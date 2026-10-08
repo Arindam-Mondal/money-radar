@@ -221,3 +221,32 @@ __marimo__/
 
 # Local design docs (PRD, architecture, design): not published
 docs/
+
+# ---------------------------------------------------------------
+# Money Radar
+# ---------------------------------------------------------------
+
+# File-based secrets: ignore everything except the README.
+# (Must be secrets/* not secrets/ — git can't re-include inside an ignored dir.)
+secrets/*
+!secrets/README.md
+
+# Google OAuth files that tend to land in the repo root by accident
+client_secret*.json
+credentials*.json
+token*.json
+
+# Keys and certificates
+*.pem
+*.key
+
+# Raw email exports: fixtures must be masked, never raw
+*.eml
+*.mbox
+
+# Frontend
+node_modules/
+.next/
+
+# Keep the env template tracked
+!.env.example
