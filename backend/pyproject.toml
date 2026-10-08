@@ -37,7 +37,10 @@ select = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**" = ["S101"]   # assert is how pytest works; bandit flags it everywhere else
+"tests/**" = [
+    "S101",     # assert is how pytest works; bandit flags it everywhere else
+    "S105", "S106",  # tests use dummy passwords on purpose; still enforced in app/
+]
 
 [tool.mypy]
 python_version = "3.12"
