@@ -1,0 +1,7 @@
+# Store and check out text files with LF everywhere, so files copied into Linux
+# containers (Dockerfiles, shell scripts, entrypoints) work on any host OS.
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.ico binary
