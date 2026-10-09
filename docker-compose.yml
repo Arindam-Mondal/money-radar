@@ -1,3 +1,18 @@
+# Shared by every service that runs the backend image (api, migrate, later worker).
+x-backend: &backend
+  build:
+    context: ./backend
+  image: money-radar-backend:dev
+  env_file: .env
+  # Same hardening verified with docker run in 0.6.
+  read_only: true
+  tmpfs:
+    - /tmp
+  cap_drop:
+    - ALL
+  security_opt:
+    - no-new-privileges:true
+
 services:
   db:
     image: postgres:16
@@ -16,15 +31,23 @@ services:
       timeout: 3s
       retries: 10
 
-  api:
-    build:
-      context: ./backend
-    image: money-radar-backend:dev
-    restart: unless-stopped
-    env_file: .env
+  # One-shot: bring the schema to head, then exit. api only starts if this exits 0.
+  migrate:
+    <<: *backend
+    command: ["alembic", "upgrade", "head"]
+    restart: "no"  # never restart a one-shot job, or it loops after every successful exit
     depends_on:
       db:
         condition: service_healthy
+
+  api:
+    <<: *backend
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     ports:
       - "127.0.0.1:8000:8000"
     healthcheck:
@@ -34,14 +57,6 @@ services:
       timeout: 3s
       retries: 5
       start_period: 15s
-    # Same hardening verified with docker run in 0.6.
-    read_only: true
-    tmpfs:
-      - /tmp
-    cap_drop:
-      - ALL
-    security_opt:
-      - no-new-privileges:true
 
 volumes:
   pgdata:

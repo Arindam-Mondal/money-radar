@@ -37,6 +37,7 @@ RUN groupadd --system --gid ${APP_UID} app \
 
 WORKDIR /app
 COPY --from=builder --chown=app:app /app/.venv /app/.venv
+COPY --chown=app:app alembic.ini ./
 COPY --chown=app:app app ./app
 
 # Bytecode is precompiled at build time, so the container also runs with a read-only root fs.

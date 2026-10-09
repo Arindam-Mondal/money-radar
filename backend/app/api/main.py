@@ -6,6 +6,7 @@ from fastapi import FastAPI
 
 from app.api.routers import health
 from app.config import get_settings
+from app.db.session import get_engine
 
 logger = logging.getLogger("money_radar")
 
@@ -20,7 +21,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         settings.llm_provider,
     )
     yield
-    # Shutdown: nothing yet (0.8 will dispose the DB engine here).
+    # Shutdown: close pooled connections, but only if something actually created the engine.
+    if get_engine.cache_info().currsize:
+        get_engine().dispose()
 
 
 def create_app() -> FastAPI:
