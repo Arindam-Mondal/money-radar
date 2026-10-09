@@ -413,7 +413,7 @@ flowchart LR
     P5 --> G2{{"Gate 2<br/>matches bank statement"}} --> P6
 ```
 
-- [ ] **P0 Foundations**: project setup, Docker, database, health checks, CI
+- [x] **P0 Foundations**: project setup, Docker, database, health checks, CI
 - [ ] **P1 Gmail ingestion**: OAuth, polling, backfill, sender authentication
 - [ ] **P2 Privacy layer**: tokenization, encrypted vault, masking, canary tests
 - [ ] **P3 Classification**: pluggable classifier, retries, sender registry

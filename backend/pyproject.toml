@@ -6,6 +6,8 @@ requires-python = ">=3.12"
 dependencies = [
     "alembic>=1.20.0",
     "fastapi>=0.142.4",
+    "google-api-python-client>=2.201.0",
+    "google-auth-oauthlib>=1.5.0",
     "psycopg[binary]>=3.3.6",
     "pydantic-settings>=2.15.0",
     "sqlalchemy>=2.1.4",
@@ -14,6 +16,7 @@ dependencies = [
 
 [dependency-groups]
 dev = [
+    "google-api-python-client-stubs>=1.40.0",
     "httpx2>=2.13.1",
     "mypy>=2.4.0",
     "pytest>=9.1.1",
@@ -46,6 +49,13 @@ select = [
 python_version = "3.12"
 strict = true
 plugins = ["pydantic.mypy"]
+# google-auth's Credentials has unannotated methods; allow calling them, results are Any.
+untyped_calls_exclude = ["google.oauth2.credentials"]
+
+[[tool.mypy.overrides]]
+# Ships no type info (no py.typed, no stubs package).
+module = ["google_auth_oauthlib.*"]
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
