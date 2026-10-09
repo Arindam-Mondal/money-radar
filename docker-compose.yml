@@ -52,7 +52,7 @@ services:
       - "127.0.0.1:8000:8000"
     healthcheck:
       # No curl in the slim image; python is already there. urlopen raises on errors/non-2xx.
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=2)"]
       interval: 10s
       timeout: 3s
       retries: 5
