@@ -187,7 +187,6 @@ Providers are picked in `.env`, independently and in any environment:
 | `LLM_PROVIDER` | `anthropic` · `ollama` | Claude | Ollama container |
 | `NOTIFIER` | `ntfy` · `whatsapp` · `none` | WhatsApp | ntfy container |
 
-- **`PRIVACY_MODE=local`** is a safety switch: the app refuses to start if any configured provider is outside your network.
 - **The same privacy pipeline** runs whatever you choose, so switching providers never weakens the rules.
 
 </details>
@@ -335,7 +334,7 @@ sequenceDiagram
 
 ---
 
-## 🚀 Getting Started 🚧
+## 🚀 Getting Started
 
 <details>
 <summary><b>Run it locally</b></summary>
@@ -344,8 +343,9 @@ sequenceDiagram
 
 **Prerequisites**
 
-- 🐳 Docker Desktop (or Docker Engine + Compose v2)
-- ☁️ A Google Cloud project with the Gmail API enabled and an OAuth desktop client
+- 🐳 Docker Desktop (or Docker Engine + Compose v2), on x86-64 or ARM64
+- 🐍 For development only: [uv](https://docs.astral.sh/uv/) (it installs Python 3.12 for you)
+- ☁️ Later phases: a Google Cloud project with the Gmail API enabled and an OAuth desktop client
 - 🧠 Optional: a GPU for faster local models with Ollama
 
 **Quick start**
@@ -353,14 +353,37 @@ sequenceDiagram
 ```bash
 git clone https://github.com/Arindam-Mondal/money-radar.git
 cd money-radar
-cp .env.example .env          # choose your providers and privacy mode
-docker compose up -d          # start the stack
+cp .env.example .env               # then set POSTGRES_PASSWORD (letters and digits)
+docker compose up -d --build --wait
 ```
 
-- 🖥️ Open the dashboard at **http://localhost:3000**
-- 📘 Explore the API at **http://localhost:8000/docs**
+This starts Postgres, applies database migrations, then starts the API once the schema is current (`db` → `migrate` → `api`).
 
-> Setup instructions will be finalized as the foundation phase lands.
+- ❤️ Liveness: **http://127.0.0.1:8000/health**
+- ✅ Readiness (database reachable): **http://127.0.0.1:8000/health/ready**
+- 📘 API docs: **http://127.0.0.1:8000/docs**
+
+Ports are bound to `127.0.0.1` only. If `8000` or `5433` is taken on your machine, change `API_HOST_PORT` / `DB_HOST_PORT` in `.env`. Your data lives in the `money-radar_pgdata` Docker volume: `docker compose down` keeps it, **`docker compose down -v` deletes it**.
+
+**Development**
+
+```bash
+cd backend
+uv sync                            # local venv for your editor and tests
+uv run pytest                      # unit tests (no database needed)
+uv run ruff check . && uv run mypy app tests
+uv tool install pre-commit && pre-commit install   # run once, from the repo root
+```
+
+New database migration, after changing `app/db/models.py` (run from `backend/`, with the stack up):
+
+```bash
+DB_HOST=127.0.0.1 DB_PORT=5433 uv run --env-file ../.env alembic revision --autogenerate --rev-id 0002 -m "short description"
+```
+
+Read the generated file before committing it; autogenerate can't detect renames or enum changes.
+
+> 🚧 The dashboard (http://127.0.0.1:3000) arrives in phase 7.
 
 </details>
 

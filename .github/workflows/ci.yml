@@ -1,0 +1,115 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A newer push to the same branch cancels the run still in progress.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  UV_VERSION: "0.11.17" # same uv as local and the Dockerfile
+
+jobs:
+  # Lint, types, unit tests, and migrations against a real, empty Postgres.
+  backend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: money_radar
+          POSTGRES_PASSWORD: ci-password
+          POSTGRES_DB: money_radar
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U money_radar -d money_radar"
+          --health-interval 5s --health-timeout 3s --health-retries 10
+    env:
+      DB_HOST: 127.0.0.1
+      DB_PORT: "5432"
+      DB_PASSWORD: ci-password
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@v10
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
+
+      - name: Install (fails if uv.lock is out of date with pyproject.toml)
+        run: uv sync --locked
+
+      - name: Ruff lint
+        run: uv run ruff check --output-format=github .
+
+      - name: Ruff format
+        run: uv run ruff format --check .
+
+      - name: Mypy
+        run: uv run mypy app tests
+
+      - name: Unit tests
+        run: uv run pytest -q
+
+      - name: Migrations apply to an empty database
+        run: uv run alembic upgrade head
+
+      - name: Models and migrations agree (no missing migration)
+        run: uv run alembic check
+
+      - name: Migrations round-trip (downgrade to base, upgrade again)
+        run: |
+          uv run alembic downgrade base
+          uv run alembic upgrade head
+
+  # Same files as the pre-commit hooks, so a skipped local hook still gets caught.
+  hygiene:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10
+        with:
+          version: ${{ env.UV_VERSION }}
+      - name: Generic file checks (ruff/mypy run in the backend job)
+        run: uvx pre-commit run --all-files --show-diff-on-failure
+        env:
+          SKIP: ruff-check,ruff-format,mypy
+
+  # Fresh-clone check: build the image and start the whole stack exactly as a new user would.
+  stack:
+    runs-on: ubuntu-latest
+    needs: backend
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Create .env from the template (as a new user would)
+        run: cp .env.example .env
+
+      - name: Build and start (db → migrate → api, waits for healthchecks)
+        run: docker compose up -d --build --wait
+
+      - name: Smoke test
+        run: |
+          curl -fsS http://127.0.0.1:8000/health
+          curl -fsS http://127.0.0.1:8000/health/ready
+          docker compose ps -a
+          test "$(docker inspect -f '{{.State.ExitCode}}' "$(docker compose ps -aq migrate)")" = 0
+
+      - name: Logs on failure
+        if: failure()
+        run: docker compose logs
+
+      - name: Tear down
+        if: always()
+        run: docker compose down -v

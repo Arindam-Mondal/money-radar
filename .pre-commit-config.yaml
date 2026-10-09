@@ -1,0 +1,40 @@
+# Runs on every `git commit`. Install once: `uv tool install pre-commit && pre-commit install`.
+# Run on everything: `pre-commit run --all-files`.
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-toml
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: ["--maxkb=500"]
+      - id: detect-private-key # PEM keys pasted into code or fixtures
+      - id: mixed-line-ending
+        args: ["--fix=lf"]
+
+  # Local hooks run through uv so they use the exact ruff/mypy versions in backend/uv.lock,
+  # the same ones CI and the editor use. No separately pinned hook versions to drift.
+  - repo: local
+    hooks:
+      - id: ruff-check
+        name: ruff check (backend)
+        entry: uv run --project backend --frozen ruff check --fix
+        language: system
+        types: [python]
+        files: ^backend/
+      - id: ruff-format
+        name: ruff format (backend)
+        entry: uv run --project backend --frozen ruff format
+        language: system
+        types: [python]
+        files: ^backend/
+      - id: mypy
+        name: mypy (backend)
+        entry: uv run --directory backend --frozen mypy app tests
+        language: system
+        types: [python]
+        files: ^backend/
+        pass_filenames: false # type-check the whole project: one file's change can break another
