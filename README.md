@@ -362,6 +362,7 @@ This starts Postgres, applies database migrations, then starts the API once the 
 - ❤️ Liveness: **http://127.0.0.1:8000/health**
 - ✅ Readiness (database reachable): **http://127.0.0.1:8000/health/ready**
 - 📘 API docs: **http://127.0.0.1:8000/docs**
+- 📖 All commands and test scenarios: **[guide.md](guide.md)**
 
 Ports are bound to `127.0.0.1` only. If `8000` or `5433` is taken on your machine, change `API_HOST_PORT` / `DB_HOST_PORT` in `.env`. Your data lives in the `money-radar_pgdata` Docker volume: `docker compose down` keeps it, **`docker compose down -v` deletes it**.
 
@@ -382,6 +383,8 @@ DB_HOST=127.0.0.1 DB_PORT=5433 uv run --env-file ../.env alembic revision --auto
 ```
 
 Read the generated file before committing it; autogenerate can't detect renames or enum changes.
+
+📖 **[Developer guide](guide.md)**: every command for running, testing and exploring the app (stack, database, migrations, tests, Gmail OAuth, search-filter preview, failure scenarios, troubleshooting).
 
 > 🚧 The dashboard (http://127.0.0.1:3000) arrives in phase 7.
 
