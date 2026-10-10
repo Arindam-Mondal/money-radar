@@ -21,6 +21,11 @@ class Base(DeclarativeBase):
     type_annotation_map: ClassVar[dict[type, Any]] = {datetime: DateTime(timezone=True)}
 
 
+def pg_enum(enum_class: type[StrEnum], name: str) -> Enum:
+    """A Postgres enum type that stores the members' lowercase values, not their names."""
+    return Enum(enum_class, name=name, values_callable=lambda e: [member.value for member in e])
+
+
 class SyncState(Base):
     """Single-row cursor for the Gmail incremental poller (ING-1)."""
 
@@ -58,12 +63,7 @@ class Message(Base):
     sender_domain: Mapped[str | None] = mapped_column(Text)  # set by the auth check (1.5)
     auth_result: Mapped[str | None] = mapped_column(Text)  # set by the auth check (1.5)
     status: Mapped[MessageStatus] = mapped_column(
-        Enum(
-            MessageStatus,
-            name="message_status",
-            # Store the lowercase values ("fetched"), not the member names ("FETCHED").
-            values_callable=lambda enum: [member.value for member in enum],
-        ),
+        pg_enum(MessageStatus, "message_status"),
         default=MessageStatus.FETCHED,
         server_default=MessageStatus.FETCHED.value,
         index=True,
@@ -72,3 +72,24 @@ class Message(Base):
     error: Mapped[str | None] = mapped_column(Text)  # short reason for failed/needs_review
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(server_default=func.now(), onupdate=func.now())
+
+
+class SenderStatus(StrEnum):
+    """Trust level of a sender domain (CLS-3). Set by classification (P3) and the user."""
+
+    LEARNED = "learned"  # seen sending transactions; first message held for review
+    APPROVED = "approved"  # user confirmed it's really their bank: skip new-sender review
+    BLOCKED = "blocked"  # user rejected it (e.g. lookalike domain): its mail is dropped
+
+
+class SenderRegistry(Base):
+    """Known sender domains, so a lookalike domain that passes DMARC still gets reviewed."""
+
+    __tablename__ = "sender_registry"
+    # Lowercase only: otherwise "HDFCBank.net" and "hdfcbank.net" could be two rows.
+    __table_args__ = (CheckConstraint("domain = lower(domain)", name="domain_lowercase"),)
+
+    domain: Mapped[str] = mapped_column(Text, primary_key=True)
+    status: Mapped[SenderStatus] = mapped_column(pg_enum(SenderStatus, "sender_status"))
+    first_seen: Mapped[datetime] = mapped_column(server_default=func.now())
+    txn_count: Mapped[int] = mapped_column(default=0, server_default="0")

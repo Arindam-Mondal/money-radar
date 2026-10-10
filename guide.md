@@ -80,7 +80,12 @@ Handy queries on ingested mail (metadata only; bodies are never stored):
 select status, count(*) from messages group by status order by 2 desc;   -- pipeline overview
 select gmail_id, received_at, status, error from messages order by received_at desc limit 20;
 select enum_range(null::message_status);                                -- allowed statuses
+select auth_result, count(*) from messages group by auth_result;         -- DMARC verdicts (ING-5)
+select sender_domain, count(*) from messages where status = 'unverified' group by 1;  -- quarantined senders
+select * from sender_registry order by first_seen desc;                  -- known sender domains
 ```
+
+`auth_result` codes: `dmarc=pass` (continues), and for quarantined (`unverified`) mail: `dmarc=fail` / `dmarc=none` / `dmarc=temperror` / … (Gmail's verdict), `dmarc=absent` (no DMARC result), `dmarc=misaligned` (pass was for another domain), `untrusted-authserv` (first header not written by Gmail), `no-auth-results`, `bad-from` (missing, multiple or malformed From).
 
 ## 5. Migrations (Alembic)
 
@@ -170,6 +175,8 @@ From `backend/`:
 | Try other terms | `uv run python -m scripts.gmail_preview --days 30 --terms "Rs,INR,debited,credited,UPI" --per-term` |
 | See a symbol-only term refused | `uv run python -m scripts.gmail_preview --terms "Rs,₹"` → `ValueError: … has no letters` |
 
+The listing includes a `dmarc` column: the verdict the DMARC check (ING-5) would record for each message. Real bank mail should show `dmarc=pass`; anything else would be quarantined as `unverified`.
+
 What to look for: a bank or payment app that emails you but **doesn't** appear is a missed message (false negative); find a word from its subject that would catch it and add it to the region pack's `search_terms`. Extra non-bank matches are fine; classification (P3) filters them later.
 
 On Windows, if printing `₹` or emoji fails with `UnicodeEncodeError`, prefix the command with `PYTHONIOENCODING=utf-8`.
@@ -187,6 +194,9 @@ Each one shows a design decision working. From `repo/`, stack up.
 | Unknown region pack | set `REGION_PACKS=mars` in `.env` | startup fails with `unknown region pack(s) ['mars']` (once the worker loads packs, P1.6) |
 | Migrations are idempotent | `docker compose up -d --wait` twice | second `migrate` run applies nothing |
 | Same message recorded twice | `test_recording_twice_keeps_one_row` (integration tests, section 6) | first insert returns True, second False; one row (`ON CONFLICT DO NOTHING` on `gmail_id`) |
+| Forged "pass" header ignored | `uv run pytest tests/unit/test_dmarc.py -v -k "added_by_the_sender or comments or untrusted"` (from `backend/`) | Gmail's own (first) verdict wins; a `dmarc=pass` added by the sender or hidden in a comment doesn't count |
+| Lookalike domain | `uv run pytest tests/unit/test_dmarc.py -v -k misaligned` (from `backend/`) | `bank.example.evil.example` / `notbank.example` → `dmarc=misaligned`, quarantined |
+| Mixed-case domain rejected by the DB | `docker compose exec db psql -U money_radar -d money_radar -c "insert into sender_registry (domain, status) values ('HDFC.example', 'learned')"` | `violates check constraint "ck_sender_registry_domain_lowercase"` |
 | Invalid status rejected by the DB | `docker compose exec db psql -U money_radar -d money_radar -c "insert into messages (gmail_id, received_at, status, pipeline_version) values ('x', now(), 'banana', 1)"` | `invalid input value for enum message_status: "banana"`; nothing inserted |
 
 ## 10. Troubleshooting
@@ -201,6 +211,8 @@ Each one shows a design decision working. From `repo/`, stack up.
 | Commit blocked by pre-commit | Read the hook output; `uv run ruff format .` fixes most of it, then `git add` and commit again |
 | `type "…" already exists` on `alembic upgrade` after a downgrade | The downgrade left an enum type behind; see "Enum trap" in section 5. One-off cleanup: `docker compose exec db psql -U money_radar -d money_radar -c 'DROP TYPE <name>;'` |
 | `uv run pytest` says `N deselected` | Expected: integration tests are opt-in (`-m integration`, section 6) |
+| `ruff format --check` fails on files you just typed or pasted | Run `uv run ruff format .`. To avoid it: install the Ruff VS Code extension and enable format on save |
+| `warning: CRLF will be replaced by LF` on `git add` | Your editor saved Windows line endings; git converts them (`.gitattributes` forces LF), so it's harmless. To stop it: VS Code setting **Files: Eol** → `\n` |
 | `git status` shows a file modified but `git diff` is empty | Stale file timestamp; `git add <file>` clears it |
 | Gmail: browser opens on every run | Token can't be used; read the message printed before `-> starting consent` |
 | Gmail: `access_denied` / app not available | Your Google account isn't a test user on the OAuth consent screen |

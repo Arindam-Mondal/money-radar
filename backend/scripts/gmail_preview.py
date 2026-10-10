@@ -15,6 +15,7 @@ from datetime import UTC, datetime, timedelta
 from itertools import islice
 from pathlib import Path
 
+from app.pipeline.auth.dmarc import check_dmarc
 from app.pipeline.gmail.client import GmailMailSource
 from app.pipeline.gmail.query import build_query
 from app.regions import RegionPack, load_region_packs
@@ -60,14 +61,15 @@ def main() -> None:
                 print(f"  {term!r:<14} {_count(source, build_query([one], **window))}")
         print()
 
-    print(f"Newest {args.limit} matches:")
-    print(f"  {'received (local time)':<22} {'from':<40} subject")
+    print(f"Newest {args.limit} matches (dmarc = the ING-5 verdict the pipeline would record):")
+    print(f"  {'received (local time)':<22} {'dmarc':<20} {'from':<40} subject")
     for message_id in islice(source.iter_message_ids(query), args.limit):
         msg = source.get_message(message_id)
         received = msg.received_at.astimezone().strftime("%Y-%m-%d %H:%M")
+        verdict = check_dmarc(msg).reason
         sender = (msg.header("From") or "?")[:40]
         subject = (msg.header("Subject") or "(no subject)")[:70]
-        print(f"  {received:<22} {sender:<40} {subject}")
+        print(f"  {received:<22} {verdict:<20} {sender:<40} {subject}")
 
 
 if __name__ == "__main__":
