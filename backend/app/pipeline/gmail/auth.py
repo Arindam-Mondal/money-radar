@@ -22,10 +22,12 @@ class GmailAuthError(RuntimeError):
 
 
 def _save_token(creds: Credentials, token_path: Path) -> None:
-    # 0o600 = owner read/write only. Applied at creation, so there's no window
-    # where the file is world-readable. (Windows ignores the mode; Linux/container honours it.)
+    # 0o600 = owner read/write only. os.open's mode applies only when it CREATES the file,
+    # so chmod too (before writing) in case an existing file is more open.
+    # Enforced on Linux/macOS (incl. containers); Windows ignores mode bits (uses ACLs).
     fd = os.open(token_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as f:
+    with os.fdopen(fd, "w", encoding="utf-8") as f:  # owns fd from here: always closed
+        os.chmod(token_path, 0o600)
         f.write(creds.to_json())
 
 
@@ -34,7 +36,10 @@ def load_credentials(token_path: Path) -> Credentials:
         raise GmailAuthError(
             f"No Gmail token at {token_path}. Run: uv run python -m app.pipeline.gmail.auth"
         )
-    creds: Credentials = Credentials.from_authorized_user_file(str(token_path), SCOPES)
+    try:
+        creds: Credentials = Credentials.from_authorized_user_file(str(token_path), SCOPES)
+    except ValueError as e:  # corrupt JSON (JSONDecodeError) or missing required keys
+        raise GmailAuthError(f"Gmail token at {token_path} is unreadable; re-run consent") from e
     if creds.valid:
         return creds  # access token still good (the common case)
     if creds.expired and creds.refresh_token:
