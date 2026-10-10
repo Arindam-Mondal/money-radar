@@ -8,7 +8,9 @@ from datetime import datetime
 
 from app.pipeline.gmail.source import HistoryDelta, HistoryExpiredError, MailMessage
 
-# Our query builder (1.3) emits epoch seconds: after:<ts> (inclusive), before:<ts> (exclusive).
+# build_query emits epoch seconds. The fake applies them exactly: after:<ts> inclusive,
+# before:<ts> exclusive. Real Gmail drifts by up to ~1 minute at the edges (measured), which
+# is why backfill pads its windows and relies on idempotent inserts rather than exact edges.
 _AFTER = re.compile(r"\bafter:(\d+)\b")
 _BEFORE = re.compile(r"\bbefore:(\d+)\b")
 
