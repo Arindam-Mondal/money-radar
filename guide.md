@@ -74,6 +74,14 @@ Ports are configurable in `.env` (`API_HOST_PORT`, `DB_HOST_PORT`) if 8000 or 54
 
 Useful psql commands: `\dt` (tables), `\d messages` (columns, indexes, constraints), `\dT+` (enum types), `\q` (quit).
 
+Handy queries on ingested mail (metadata only; bodies are never stored):
+
+```sql
+select status, count(*) from messages group by status order by 2 desc;   -- pipeline overview
+select gmail_id, received_at, status, error from messages order by received_at desc limit 20;
+select enum_range(null::message_status);                                -- allowed statuses
+```
+
 ## 5. Migrations (Alembic)
 
 Run from `backend/` with the stack up. The `DB_HOST`/`DB_PORT` overrides point Alembic at the host-mapped port.
@@ -90,8 +98,11 @@ export DB_HOST=127.0.0.1 DB_PORT=5433       # PowerShell: $env:DB_HOST="127.0.0.
 | Apply | `uv run --env-file ../.env alembic upgrade head` |
 | Undo the last one | `uv run --env-file ../.env alembic downgrade -1` |
 | Models and migrations agree? | `uv run --env-file ../.env alembic check` |
+| Round trip (what CI runs) | `uv run --env-file ../.env alembic downgrade -1 && uv run --env-file ../.env alembic upgrade head` |
 
-Rules: read every generated migration before committing it (autogenerate can't see renames or enum value changes); commit the model and its migration together; never edit a migration that has been applied anywhere, write a new one.
+Rules: read every generated migration before committing it (autogenerate can't see renames or enum value changes); commit the model and its migration together; never edit a migration that has been applied anywhere, write a new one; run the round trip before pushing.
+
+**Enum trap:** autogenerate's `downgrade()` drops a table but not the Postgres enum type the table created, so downgrade + upgrade fails with `type "…" already exists`. Add `sa.Enum(name="…").drop(op.get_bind(), checkfirst=True)` after `op.drop_table(...)` (see `0002_messages.py`).
 
 ## 6. Tests and quality checks
 
@@ -119,6 +130,15 @@ From `repo/`:
 | CI runs on GitHub | `gh run list --limit 5` / `gh run view --log-failed` |
 
 Unit tests need no database, network or Gmail: Gmail is replaced by `tests/fakes/mail_source.py` (`FakeMailSource`). One test (`test_refreshed_token_file_is_owner_only`) only runs on Linux/macOS, so it shows as skipped on Windows and runs in CI.
+
+**Integration tests** (`tests/integration/`, marker `integration`) run against a real, migrated Postgres. Plain `uv run pytest` skips them (`N deselected`). Each test runs in a transaction that is rolled back, so they leave no rows behind, even in your dev database.
+
+| Task | Command (from `backend/`, stack up) |
+|---|---|
+| Integration tests only | `DB_HOST=127.0.0.1 DB_PORT=5433 uv run --env-file ../.env pytest -m integration` |
+| Unit + integration | `DB_HOST=127.0.0.1 DB_PORT=5433 uv run --env-file ../.env pytest -m "integration or not integration"` |
+
+If Postgres isn't reachable they fail with a message saying how to start it. If the schema is behind (e.g. `relation "messages" does not exist`), apply migrations first: `docker compose up -d --build --wait` from `repo/`, or `alembic upgrade head` (section 5).
 
 ## 7. Gmail: OAuth and token
 
@@ -166,6 +186,8 @@ Each one shows a design decision working. From `repo/`, stack up.
 | Bad config | set `POLL_INTERVAL_SECONDS=5` in `.env`, then `docker compose up -d --wait` | `api` fails to start; `docker compose logs api` lists the invalid field |
 | Unknown region pack | set `REGION_PACKS=mars` in `.env` | startup fails with `unknown region pack(s) ['mars']` (once the worker loads packs, P1.6) |
 | Migrations are idempotent | `docker compose up -d --wait` twice | second `migrate` run applies nothing |
+| Same message recorded twice | `test_recording_twice_keeps_one_row` (integration tests, section 6) | first insert returns True, second False; one row (`ON CONFLICT DO NOTHING` on `gmail_id`) |
+| Invalid status rejected by the DB | `docker compose exec db psql -U money_radar -d money_radar -c "insert into messages (gmail_id, received_at, status, pipeline_version) values ('x', now(), 'banana', 1)"` | `invalid input value for enum message_status: "banana"`; nothing inserted |
 
 ## 10. Troubleshooting
 
@@ -177,6 +199,8 @@ Each one shows a design decision working. From `repo/`, stack up.
 | Editor shows "could not be resolved" | Select `backend/.venv` as the interpreter |
 | `docker: Cannot connect to the Docker daemon` | Start Docker Desktop |
 | Commit blocked by pre-commit | Read the hook output; `uv run ruff format .` fixes most of it, then `git add` and commit again |
+| `type "…" already exists` on `alembic upgrade` after a downgrade | The downgrade left an enum type behind; see "Enum trap" in section 5. One-off cleanup: `docker compose exec db psql -U money_radar -d money_radar -c 'DROP TYPE <name>;'` |
+| `uv run pytest` says `N deselected` | Expected: integration tests are opt-in (`-m integration`, section 6) |
 | `git status` shows a file modified but `git diff` is empty | Stale file timestamp; `git add <file>` clears it |
 | Gmail: browser opens on every run | Token can't be used; read the message printed before `-> starting consent` |
 | Gmail: `access_denied` / app not available | Your Google account isn't a test user on the OAuth consent screen |

@@ -65,6 +65,9 @@ jobs:
       - name: Migrations apply to an empty database
         run: uv run alembic upgrade head
 
+      - name: Integration tests (real Postgres, migrated schema)
+        run: uv run pytest -q -m integration
+
       - name: Models and migrations agree (no missing migration)
         run: uv run alembic check
 
