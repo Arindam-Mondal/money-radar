@@ -1,4 +1,4 @@
-"""Gmail search query builder (ING-3): only money-looking mail, no promotions/social."""
+"""Gmail search query builder (ING-3): only money-looking mail; no promotions, social or sent."""
 
 from collections.abc import Iterable
 from datetime import datetime
@@ -24,6 +24,7 @@ def build_query(
     terms = _unique_terms(packs)
     parts = ["(" + " OR ".join(f'"{term}"' for term in terms) + ")"]
     parts += [f"-category:{category}" for category in _EXCLUDED_CATEGORIES]
+    parts.append("-in:sent")  # your own outgoing mail ("sent you Rs 500") is never a bank alert
     if after is not None:
         parts.append(f"after:{_epoch(after, 'after')}")
     if before is not None:

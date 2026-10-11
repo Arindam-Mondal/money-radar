@@ -128,6 +128,8 @@ From `backend/`:
 | Format | `uv run ruff format .` |
 | Types (strict) | `uv run mypy .` |
 | Everything CI runs on code | `uv run ruff check . && uv run ruff format --check . && uv run mypy . && uv run pytest -q` |
+| Property tests, with how many cases ran | `uv run pytest tests/unit/test_ranges.py --hypothesis-show-statistics` |
+| Property tests with a fixed seed (reproducible run) | `uv run pytest tests/unit/test_ranges.py --hypothesis-seed=1` |
 
 From `repo/`:
 
@@ -137,6 +139,8 @@ From `repo/`:
 | CI runs on GitHub | `gh run list --limit 5` / `gh run view --log-failed` |
 
 Unit tests need no database, network or Gmail: Gmail is replaced by `tests/fakes/mail_source.py` (`FakeMailSource`). One test (`test_refreshed_token_file_is_owner_only`) only runs on Linux/macOS, so it shows as skipped on Windows and runs in CI.
+
+**Property-based tests** (`tests/unit/test_ranges.py`) use Hypothesis: instead of fixed examples, each test runs ~100 generated inputs and checks a rule that must always hold (e.g. "gaps = requested days − covered days", compared against a brute-force set of days). When one fails, Hypothesis shrinks it to the smallest input that still fails and prints it as `Falsifying example: …`; that example is saved in `backend/.hypothesis/` (git-ignored) and tried first on the next run.
 
 **Integration tests** (`tests/integration/`, marker `integration`) run against a real, migrated Postgres. Plain `uv run pytest` skips them (`N deselected`). Each test runs in a transaction that is rolled back, so they leave no rows behind, even in your dev database.
 

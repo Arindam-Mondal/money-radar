@@ -19,6 +19,7 @@ dependencies = [
 dev = [
     "google-api-python-client-stubs>=1.40.0",
     "httpx2>=2.13.1",
+    "hypothesis>=6.169.0",
     "mypy>=2.4.0",
     "pytest>=9.1.1",
     "ruff>=0.16.10",

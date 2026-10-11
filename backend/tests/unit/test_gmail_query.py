@@ -19,7 +19,8 @@ def test_india_pack_query_without_window() -> None:
     query = build_query(load_region_packs(["india"]))
 
     assert (
-        query == '("Rs" OR "INR" OR "debited" OR "credited") -category:promotions -category:social'
+        query == '("Rs" OR "INR" OR "debited" OR "credited") '
+        "-category:promotions -category:social -in:sent"
     )
 
 
