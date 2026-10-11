@@ -4,7 +4,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from app.api.routers import health
+from app.api.routers import backfill, health
 from app.config import get_settings
 from app.db.session import get_engine
 
@@ -30,6 +30,7 @@ def create_app() -> FastAPI:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s:     %(name)s - %(message)s")
     app = FastAPI(title="Money Radar", version="0.1.0", lifespan=lifespan)
     app.include_router(health.router)
+    app.include_router(backfill.router)
     return app
 
 

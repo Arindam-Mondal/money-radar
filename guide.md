@@ -201,7 +201,7 @@ On Windows, if printing `₹` or emoji fails with `UnicodeEncodeError`, prefix t
 
 The `worker` service (`python -m app.worker`) runs APScheduler jobs. It's the only process that talks to Gmail. It has two jobs: `poll_gmail` (below) and `run_backfills` (next paragraph). `poll_gmail` runs at startup and then every `POLL_INTERVAL_SECONDS` (default 120). Each tick searches Gmail with the ING-3 filter for mail received after the **watermark** (`sync_state.polled_until`, the start time of the last successful poll) minus `POLL_OVERLAP_MINUTES` (default 10), records the new messages with their DMARC verdict, and moves the watermark, all in one transaction. The overlap re-reads the last few minutes on purpose to catch mail Gmail indexed late; already-recorded ids are skipped without being downloaded. The very first poll looks back 1 day; older mail is the backfill's job.
 
-`run_backfills` runs at startup and every `JOB_POLL_SECONDS` (default 30, 5–300). It drains the `jobs` queue: claims the oldest ready backfill job, runs it (saving progress with every batch), marks it `done`, or `queued` again with a delay after a temporary error, or `failed` after a permanent one, and repeats until nothing is ready. While a backfill runs, its ticks are skipped (not logged). Until the API endpoint exists (P1.9c), queue a job with SQL (below). From `repo/`:
+`run_backfills` runs at startup and every `JOB_POLL_SECONDS` (default 30, 5–300). It drains the `jobs` queue: claims the oldest ready backfill job, runs it (saving progress with every batch), marks it `done`, or `queued` again with a delay after a temporary error, or `failed` after a permanent one, and repeats until nothing is ready. While a backfill runs, its ticks are skipped (not logged). Backfills are queued through the API (section 10). From `repo/`:
 
 | Task | Command | Expect |
 |---|---|---|
@@ -209,7 +209,7 @@ The `worker` service (`python -m app.worker`) runs APScheduler jobs. It's the on
 | See the watermark | `docker compose exec db psql -U money_radar -d money_radar -c "select polled_until from sync_state"` | start time of the last successful poll (UTC) |
 | What was recorded | `docker compose exec db psql -U money_radar -d money_radar -c "select status, auth_result, count(*) from messages group by 1, 2"` | e.g. `fetched \| dmarc=pass \| 9` |
 | Change the overlap | set `POLL_OVERLAP_MINUTES=30` in `.env` (1–1440), then `docker compose up -d --wait worker` | Compose recreates the container (no rebuild); next `after=` is 30 min before the watermark |
-| Queue a backfill (until `POST /backfill` exists) | `docker compose exec db psql -U money_radar -d money_radar -c "insert into jobs (kind, params) values ('backfill', '{\"start\": \"2026-08-18\", \"end\": \"2026-08-25\"}')"` (`end` is exclusive) | within `JOB_POLL_SECONDS`: `backfill job <id>: attempt 1, params …`, then `backfill job <id>: done, gaps=1 listed=N recorded=N` |
+| Queue a backfill | via the API, see section 10 (`POST /backfill`) | within `JOB_POLL_SECONDS`: `backfill job <id>: attempt 1, params …`, then `backfill job <id>: done, gaps=1 listed=N recorded=N` |
 | Watch a job | `docker compose exec db psql -U money_radar -d money_radar -c "select id, status, attempts, error, run_after, progress from jobs order by id desc limit 5"` | `progress` grows batch by batch: `{"gaps_total": 1, "gaps_done": 0, "listed": 100, "recorded": 100, …}` |
 | Pick up jobs faster while testing | set `JOB_POLL_SECONDS=5` in `.env`, then `docker compose up -d --wait worker` | a queued job starts within ~5 s |
 | Health | `docker compose ps worker` | `healthy` (a job finished within the last 3 intervals) |
@@ -219,6 +219,22 @@ The `worker` service (`python -m app.worker`) runs APScheduler jobs. It's the on
 | Run on the host (no Docker) | `GMAIL_TOKEN_FILE=../secrets/gmail/gmail_token.json uv run --env-file ../.env python -m app.worker` (from `backend/`) | same log lines; Ctrl+C stops it cleanly |
 
 ## 10. Backfill
+
+### Through the API (normal way)
+
+The API only queues the request (`jobs` table) and answers `202 Accepted`; the worker runs it within `JOB_POLL_SECONDS` and saves progress with every batch of 100. Dates are **inclusive** calendar days in your `TZ`. Interactive docs: http://127.0.0.1:8000/docs. From any directory, stack up:
+
+| Task | Git Bash | PowerShell | Expect |
+|---|---|---|---|
+| Queue a backfill | `curl -i -X POST http://127.0.0.1:8000/backfill -H "Content-Type: application/json" -d '{"start":"2026-08-10","end":"2026-08-17"}'` | `Invoke-RestMethod -Method Post http://127.0.0.1:8000/backfill -ContentType application/json -Body '{"start":"2026-08-10","end":"2026-08-17"}'` | `202 Accepted`, `Location: /backfill/<id>`, body with `"status":"queued"` |
+| Follow it | `curl http://127.0.0.1:8000/backfill/<id>` | `Invoke-RestMethod http://127.0.0.1:8000/backfill/<id>` | `queued` → `running` (`progress.gaps_total` set) → `done`, `progress.recorded` = new messages |
+| Why did it fail? | same GET | same | `"status":"failed"`, `"error":"GmailAuthError"` (re-consent, queue again) or `"HttpError 400"`; a temporary error shows `"status":"queued"`, `error` set and a later `run_after` (it retries by itself) |
+| Bad requests | `-d '{"start":"2026-09-30","end":"2026-09-01"}'`, an end in the future, a start of today, > 1098 days, an unknown field | same | `422` with the reason in `detail`; nothing queued |
+| Unknown job | `curl -i http://127.0.0.1:8000/backfill/999999` | `Invoke-RestMethod http://127.0.0.1:8000/backfill/999999` | `404 no such backfill job` |
+
+In PowerShell 5.1, `curl` is an alias for `Invoke-WebRequest` and doesn't take these flags; use `curl.exe` or `Invoke-RestMethod`. With fewer than 100 messages a job has a single batch, so `recorded` jumps from 0 straight to the total.
+
+### From the command line (no API, runs in your terminal)
 
 Ingests past mail for a range of calendar days (ING-2). `--from` and `--to` are inclusive days in your `TZ` (default `Asia/Kolkata`, so a 00:30 IST alert counts for that IST day). Days already backfilled are recorded in `sync_ranges` and skipped, so re-running a backfill is free. Only complete days are backfilled: a range reaching today stops at yesterday (today is the poller's job). From `repo/`, stack up:
 
