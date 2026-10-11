@@ -99,7 +99,7 @@ jobs:
       - name: Create .env from the template (as a new user would)
         run: cp .env.example .env
 
-      - name: Build and start (db → migrate → api, waits for healthchecks)
+      - name: Build and start (db → migrate → api + worker, waits for healthchecks)
         run: docker compose up -d --build --wait
 
       - name: Smoke test

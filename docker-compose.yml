@@ -1,4 +1,4 @@
-# Shared by every service that runs the backend image (api, migrate, later worker).
+# Shared by every service that runs the backend image (api, migrate, worker).
 x-backend: &backend
   build:
     context: ./backend
@@ -57,6 +57,31 @@ services:
       timeout: 3s
       retries: 5
       start_period: 15s
+
+  # Long-running scheduler: owns ALL Gmail traffic (one token writer, one cursor).
+  worker:
+    <<: *backend
+    command: ["python", "-m", "app.worker"]
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    volumes:
+      # A writable DIRECTORY, not a file or a Docker secret (those are read-only, and
+      # the atomic token save renames a temp file inside this directory).
+      - ./secrets/gmail:/app/state/gmail
+    healthcheck:
+      # Healthy while jobs keep finishing (see app/worker/heartbeat.py).
+      test: ["CMD", "python", "-m", "app.worker.heartbeat"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+      start_interval: 2s  # check often while starting, so `up --wait` returns quickly
+    # SIGTERM -> scheduler waits for a running poll; SIGKILL after this. Poll is idempotent.
+    stop_grace_period: 30s
 
 volumes:
   pgdata:

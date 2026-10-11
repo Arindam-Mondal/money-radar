@@ -2,6 +2,7 @@
 
 import argparse
 import os
+import tempfile
 from pathlib import Path
 from typing import Final
 
@@ -22,13 +23,22 @@ class GmailAuthError(RuntimeError):
 
 
 def _save_token(creds: Credentials, token_path: Path) -> None:
-    # 0o600 = owner read/write only. os.open's mode applies only when it CREATES the file,
-    # so chmod too (before writing) in case an existing file is more open.
-    # Enforced on Linux/macOS (incl. containers); Windows ignores mode bits (uses ACLs).
-    fd = os.open(token_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as f:  # owns fd from here: always closed
-        os.chmod(token_path, 0o600)
-        f.write(creds.to_json())
+    # Atomic: write a temp file in the SAME directory, then os.replace() it over the token.
+    # A crash mid-write leaves the old token intact instead of a half-written one, and
+    # readers see either the old or the new file, never a mix. (Same directory = same
+    # filesystem, which rename needs; that's why the worker mounts a directory, not a file.)
+    # mkstemp creates the file 0o600 (owner only); Windows ignores mode bits (uses ACLs).
+    token_path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(dir=token_path.parent, prefix=f".{token_path.name}.")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:  # owns fd from here: always closed
+            f.write(creds.to_json())
+            f.flush()
+            os.fsync(f.fileno())  # bytes on disk before the rename makes them visible
+        os.replace(tmp_name, token_path)  # atomic on POSIX and Windows
+    except BaseException:
+        Path(tmp_name).unlink(missing_ok=True)  # don't leave temp files behind
+        raise
 
 
 def load_credentials(token_path: Path) -> Credentials:
@@ -62,7 +72,7 @@ def run_consent(client_secret_path: Path, token_path: Path) -> Credentials:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Gmail OAuth consent + smoke test")
     parser.add_argument("--client-secret", type=Path, default=_SECRETS / "client_secret.json")
-    parser.add_argument("--token", type=Path, default=_SECRETS / "gmail_token.json")
+    parser.add_argument("--token", type=Path, default=_SECRETS / "gmail" / "gmail_token.json")
     parser.add_argument(
         "--force", action="store_true", help="re-run consent even if a token exists"
     )

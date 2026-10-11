@@ -20,7 +20,7 @@ from app.pipeline.gmail.client import GmailMailSource
 from app.pipeline.gmail.query import build_query
 from app.regions import RegionPack, load_region_packs
 
-_TOKEN = Path(__file__).resolve().parents[2] / "secrets" / "gmail_token.json"
+_TOKEN = Path(__file__).resolve().parents[2] / "secrets" / "gmail" / "gmail_token.json"
 _COUNT_CAP = 5000  # stop counting here; enough to compare terms
 
 

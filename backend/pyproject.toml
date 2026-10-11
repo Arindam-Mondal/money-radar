@@ -5,6 +5,7 @@ description = "Money Radar backend: ingestion pipeline, privacy layer, API and w
 requires-python = ">=3.12"
 dependencies = [
     "alembic>=1.20.0",
+    "apscheduler>=3.11.3,<4",
     "fastapi>=0.142.4",
     "google-api-python-client>=2.201.0",
     "google-auth-oauthlib>=1.5.0",
@@ -54,7 +55,7 @@ untyped_calls_exclude = ["google.oauth2.credentials", "google.auth.exceptions"]
 
 [[tool.mypy.overrides]]
 # Ships no type info (no py.typed, no stubs package).
-module = ["google_auth_oauthlib.*"]
+module = ["google_auth_oauthlib.*", "apscheduler.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

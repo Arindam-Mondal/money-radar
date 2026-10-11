@@ -32,6 +32,9 @@ class Settings(BaseSettings):
     # REGION_PACKS=india,us  (NoDecode: a plain comma list, not the JSON pydantic expects)
     region_packs: Annotated[tuple[str, ...], NoDecode] = ("india",)
 
+    # A writable DIRECTORY is mounted at /app/state/gmail: the token is rewritten on refresh.
+    gmail_token_file: Path = Path("/app/state/gmail/gmail_token.json")
+
     db_host: str = "db"
     db_port: int = Field(default=5432, ge=1, le=65535)
     db_name: str = "money_radar"

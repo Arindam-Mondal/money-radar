@@ -123,3 +123,34 @@ def test_refreshed_token_file_is_owner_only(
     load_credentials(token)
 
     assert token.stat().st_mode & 0o777 == 0o600
+
+
+def _fake_refresh(self: Credentials, request: Request) -> None:
+    self.token = "new-access"
+    self.expiry = datetime.now(UTC).replace(tzinfo=None) + timedelta(hours=1)
+
+
+def test_refresh_leaves_no_temp_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    token = _write_token(tmp_path / "t.json", expiry=PAST)
+    monkeypatch.setattr(Credentials, "refresh", _fake_refresh)
+
+    load_credentials(token)
+
+    assert [p.name for p in tmp_path.iterdir()] == ["t.json"]
+
+
+def test_failed_save_keeps_old_token(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    token = _write_token(tmp_path / "t.json", expiry=PAST)
+    before = token.read_text(encoding="utf-8")
+    monkeypatch.setattr(Credentials, "refresh", _fake_refresh)
+
+    def _crash(src: str, dst: Path) -> None:
+        raise OSError("disk full")  # simulate a failure between write and rename
+
+    monkeypatch.setattr(os, "replace", _crash)
+
+    with pytest.raises(OSError, match="disk full"):
+        load_credentials(token)
+
+    assert token.read_text(encoding="utf-8") == before  # old token intact
+    assert [p.name for p in tmp_path.iterdir()] == ["t.json"]  # temp file cleaned up

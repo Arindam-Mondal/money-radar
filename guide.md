@@ -14,14 +14,16 @@ Commands to run, test and poke at every part of Money Radar, grouped by task. Ea
 6. [Tests and quality checks](#6-tests-and-quality-checks)
 7. [Gmail: OAuth and token](#7-gmail-oauth-and-token)
 8. [Gmail: preview the search filter](#8-gmail-preview-the-search-filter)
-9. [Failure scenarios worth trying](#9-failure-scenarios-worth-trying)
-10. [Troubleshooting](#10-troubleshooting)
+9. [Worker (scheduler)](#9-worker-scheduler)
+10. [Failure scenarios worth trying](#10-failure-scenarios-worth-trying)
+11. [Troubleshooting](#11-troubleshooting)
 
 ---
 
 ## 1. Conventions
 
 - **Shell**: commands are for Git Bash (Windows), bash or zsh. PowerShell differences are noted where they matter.
+  In PowerShell: `time <cmd>` → `Measure-Command { <cmd> }`; exit code `echo $?` → `$LASTEXITCODE` (PowerShell's `$?` is only True/False); `VAR=x cmd` → `$env:VAR='x'; cmd`.
 - **Directory**: `repo/` means the repository root; `backend/` means `cd backend` first.
 - **Python**: always run Python through `uv run …`. It uses the project's Python 3.12 and locked dependencies, whatever `python` on your PATH is.
 - **Host vs container**: from your machine, Postgres is `127.0.0.1:5433` and the API is `127.0.0.1:8000`. Inside the Compose network they are `db:5432` and `api:8000`.
@@ -51,8 +53,8 @@ Docker Desktop must be running (`docker info` should succeed). From `repo/`:
 
 | Task | Command | Expect |
 |---|---|---|
-| Start everything (build, migrate, wait until healthy) | `docker compose up -d --build --wait` | `db` healthy → `migrate` exits 0 → `api` healthy |
-| Status | `docker compose ps -a` | `migrate` shows `Exited (0)`; `db` and `api` `healthy` |
+| Start everything (build, migrate, wait until healthy) | `docker compose up -d --build --wait` | `db` healthy → `migrate` exits 0 → `api` and `worker` healthy |
+| Status | `docker compose ps -a` | `migrate` shows `Exited (0)`; `db`, `api` and `worker` `healthy` |
 | Liveness | `curl -s http://127.0.0.1:8000/health` | `{"status":"ok"}` |
 | Readiness (DB reachable) | `curl -s http://127.0.0.1:8000/health/ready` | `{"status":"ok","checks":{"database":"ok"}}` |
 | API docs | open http://127.0.0.1:8000/docs | Swagger UI |
@@ -147,7 +149,7 @@ If Postgres isn't reachable they fail with a message saying how to start it. If 
 
 ## 7. Gmail: OAuth and token
 
-Needs `secrets/client_secret.json` (Google Cloud desktop OAuth client). The token is written to `secrets/gmail_token.json`. Both are git-ignored; never commit, paste or log them.
+Needs `secrets/client_secret.json` (Google Cloud desktop OAuth client). The token is written to `secrets/gmail/gmail_token.json`; the `worker` container mounts the `secrets/gmail/` directory and rewrites the token there when it refreshes. Both are git-ignored; never commit, paste or log them.
 
 From `backend/`:
 
@@ -159,7 +161,7 @@ From `backend/`:
 | Test the refresh path | edit only `"expiry"` in the token file to `"2020-01-01T00:00:00Z"`, then run it | `OK`, no browser; `expiry` is about an hour ahead again |
 | Revoked access | remove "Money Radar" at https://myaccount.google.com/permissions, then run it | `Gmail token revoked or expired; re-run consent -> starting consent` |
 
-While the Google Cloud app is in **Testing** status, the refresh token expires after **7 days**: you'll see the "revoked or expired" message and need to consent again.
+While the Google Cloud app is in **Testing** status, the refresh token expires after **7 days**: you'll see the "revoked or expired" message and need to consent again. The worker then logs `poll skipped: Gmail token revoked or expired; re-run consent` on every tick (and stays up): run `uv run python -m app.pipeline.gmail.auth --force` from `backend/` and the next tick recovers, no restart needed. (Publishing the app would lift the limit, but Google requires a homepage and privacy policy on a domain you own; deferred to P8.)
 
 ## 8. Gmail: preview the search filter
 
@@ -181,7 +183,20 @@ What to look for: a bank or payment app that emails you but **doesn't** appear i
 
 On Windows, if printing `₹` or emoji fails with `UnicodeEncodeError`, prefix the command with `PYTHONIOENCODING=utf-8`.
 
-## 9. Failure scenarios worth trying
+## 9. Worker (scheduler)
+
+The `worker` service (`python -m app.worker`) runs APScheduler jobs. It's the only process that talks to Gmail. Right now it has one job, `poll_gmail`, which runs at startup and then every `POLL_INTERVAL_SECONDS` (default 120). It loads or refreshes the token and logs the mailbox history id; step 1.7 turns it into the real incremental fetch. From `repo/`:
+
+| Task | Command | Expect |
+|---|---|---|
+| Follow ticks | `docker compose logs -f worker` | `poll tick ok: history_id=<n>` at start, then every interval |
+| Health | `docker compose ps worker` | `healthy` (a job finished within the last 3 intervals) |
+| Run the healthcheck by hand | `docker compose exec worker python -m app.worker.heartbeat; echo $?` | `0` |
+| Graceful stop | `time docker compose stop worker` | ~1 s; log ends with `SIGTERM received, shutting down` → `worker stopped` |
+| Restart after code changes | `docker compose up -d --build --wait worker` | new container, immediate first tick |
+| Run on the host (no Docker) | `GMAIL_TOKEN_FILE=../secrets/gmail/gmail_token.json uv run --env-file ../.env python -m app.worker` (from `backend/`) | same log lines; Ctrl+C stops it cleanly |
+
+## 10. Failure scenarios worth trying
 
 Each one shows a design decision working. From `repo/`, stack up.
 
@@ -191,15 +206,17 @@ Each one shows a design decision working. From `repo/`, stack up.
 | Database back | `docker compose start db` | `/health/ready` 200 again without restarting `api` (`pool_pre_ping`) |
 | Network partition | `docker network disconnect money-radar_default money-radar-db-1` | `/health/ready` 503 within ~15 s instead of hanging (TCP keepalives); reconnect with `docker network connect money-radar_default money-radar-db-1` |
 | Bad config | set `POLL_INTERVAL_SECONDS=5` in `.env`, then `docker compose up -d --wait` | `api` fails to start; `docker compose logs api` lists the invalid field |
-| Unknown region pack | set `REGION_PACKS=mars` in `.env` | startup fails with `unknown region pack(s) ['mars']` (once the worker loads packs, P1.6) |
+| Unknown region pack | set `REGION_PACKS=mars` in `.env` | startup fails with `unknown region pack(s) ['mars']` (once the worker loads packs, P1.7) |
 | Migrations are idempotent | `docker compose up -d --wait` twice | second `migrate` run applies nothing |
 | Same message recorded twice | `test_recording_twice_keeps_one_row` (integration tests, section 6) | first insert returns True, second False; one row (`ON CONFLICT DO NOTHING` on `gmail_id`) |
 | Forged "pass" header ignored | `uv run pytest tests/unit/test_dmarc.py -v -k "added_by_the_sender or comments or untrusted"` (from `backend/`) | Gmail's own (first) verdict wins; a `dmarc=pass` added by the sender or hidden in a comment doesn't count |
 | Lookalike domain | `uv run pytest tests/unit/test_dmarc.py -v -k misaligned` (from `backend/`) | `bank.example.evil.example` / `notbank.example` → `dmarc=misaligned`, quarantined |
 | Mixed-case domain rejected by the DB | `docker compose exec db psql -U money_radar -d money_radar -c "insert into sender_registry (domain, status) values ('HDFC.example', 'learned')"` | `violates check constraint "ck_sender_registry_domain_lowercase"` |
+| Worker without a Gmail token | `mv secrets/gmail/gmail_token.json secrets/gmail/hold.json && docker compose restart worker` | one `poll skipped: No Gmail token …` error per tick; worker stays up and healthy (no restart loop). Move it back and restart |
+| Worker stopped mid-poll | `docker compose kill -s SIGKILL worker`, then `docker compose up -d worker` | next start polls again; recording is idempotent (unique `gmail_id`), so a repeated poll is harmless |
 | Invalid status rejected by the DB | `docker compose exec db psql -U money_radar -d money_radar -c "insert into messages (gmail_id, received_at, status, pipeline_version) values ('x', now(), 'banana', 1)"` | `invalid input value for enum message_status: "banana"`; nothing inserted |
 
-## 10. Troubleshooting
+## 11. Troubleshooting
 
 | Symptom | Cause / fix |
 |---|---|
@@ -214,5 +231,8 @@ Each one shows a design decision working. From `repo/`, stack up.
 | `ruff format --check` fails on files you just typed or pasted | Run `uv run ruff format .`. To avoid it: install the Ruff VS Code extension and enable format on save |
 | `warning: CRLF will be replaced by LF` on `git add` | Your editor saved Windows line endings; git converts them (`.gitattributes` forces LF), so it's harmless. To stop it: VS Code setting **Files: Eol** → `\n` |
 | `git status` shows a file modified but `git diff` is empty | Stale file timestamp; `git add <file>` clears it |
+| `time : The term 'time' is not recognized` | You're in PowerShell, not Git Bash; use `Measure-Command { … }` (see section 1) or open a Git Bash terminal |
 | Gmail: browser opens on every run | Token can't be used; read the message printed before `-> starting consent` |
+| Worker: `Permission denied` saving the token (Linux host) | `secrets/gmail/` must be writable by the container user (UID 10001): `sudo chown 10001 secrets/gmail`. Docker Desktop on Windows/macOS doesn't need this |
+| Worker: `No Gmail token at /app/state/gmail/gmail_token.json` | Token is still at the old path `secrets/gmail_token.json`: move it into `secrets/gmail/`, and set `GMAIL_TOKEN_FILE=/app/state/gmail/gmail_token.json` in `.env` |
 | Gmail: `access_denied` / app not available | Your Google account isn't a test user on the OAuth consent screen |
