@@ -1,4 +1,4 @@
-from sqlalchemy import DateTime, Text
+from sqlalchemy import DateTime
 from sqlalchemy.schema import CheckConstraint
 
 from app.db.models import Base
@@ -11,8 +11,10 @@ def test_metadata_registers_sync_state() -> None:
 
 def test_sync_state_columns() -> None:
     table = Base.metadata.tables["sync_state"]
-    assert isinstance(table.c.history_id.type, Text)
-    assert table.c.history_id.nullable
+    polled_until = table.c.polled_until.type
+    assert isinstance(polled_until, DateTime)
+    assert polled_until.timezone
+    assert table.c.polled_until.nullable  # None until the first poll commits
     updated_at = table.c.updated_at.type
     assert isinstance(updated_at, DateTime)
     assert updated_at.timezone  # timestamptz, not naive timestamp

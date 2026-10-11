@@ -34,6 +34,18 @@ def test_poll_interval_lower_bound(monkeypatch: pytest.MonkeyPatch) -> None:
         Settings()
 
 
+@pytest.mark.parametrize("value", ["0", "1441"])
+def test_poll_overlap_bounds(monkeypatch: pytest.MonkeyPatch, value: str) -> None:
+    monkeypatch.setenv("POLL_OVERLAP_MINUTES", value)
+    with pytest.raises(ValidationError):
+        Settings()
+
+
+def test_poll_overlap_reads_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("POLL_OVERLAP_MINUTES", "30")
+    assert Settings().poll_overlap_minutes == 30
+
+
 def test_missing_db_password_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("DB_PASSWORD")
     with pytest.raises(ValidationError):

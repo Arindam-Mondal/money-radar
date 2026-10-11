@@ -185,11 +185,14 @@ On Windows, if printing `₹` or emoji fails with `UnicodeEncodeError`, prefix t
 
 ## 9. Worker (scheduler)
 
-The `worker` service (`python -m app.worker`) runs APScheduler jobs. It's the only process that talks to Gmail. Right now it has one job, `poll_gmail`, which runs at startup and then every `POLL_INTERVAL_SECONDS` (default 120). It loads or refreshes the token and logs the mailbox history id; step 1.7 turns it into the real incremental fetch. From `repo/`:
+The `worker` service (`python -m app.worker`) runs APScheduler jobs. It's the only process that talks to Gmail. Right now it has one job, `poll_gmail`, which runs at startup and then every `POLL_INTERVAL_SECONDS` (default 120). Each tick searches Gmail with the ING-3 filter for mail received after the **watermark** (`sync_state.polled_until`, the start time of the last successful poll) minus `POLL_OVERLAP_MINUTES` (default 10), records the new messages with their DMARC verdict, and moves the watermark, all in one transaction. The overlap re-reads the last few minutes on purpose to catch mail Gmail indexed late; already-recorded ids are skipped without being downloaded. The very first poll looks back 1 day; older mail is the backfill's job. From `repo/`:
 
 | Task | Command | Expect |
 |---|---|---|
-| Follow ticks | `docker compose logs -f worker` | `poll tick ok: history_id=<n>` at start, then every interval |
+| Follow ticks | `docker compose logs -f worker` | `poll ok: after=<window start> listed=<n> recorded=<n> unverified=<n> failed=<n>` at start, then every interval (counts only, never subjects or senders) |
+| See the watermark | `docker compose exec db psql -U money_radar -d money_radar -c "select polled_until from sync_state"` | start time of the last successful poll (UTC) |
+| What was recorded | `docker compose exec db psql -U money_radar -d money_radar -c "select status, auth_result, count(*) from messages group by 1, 2"` | e.g. `fetched \| dmarc=pass \| 9` |
+| Change the overlap | set `POLL_OVERLAP_MINUTES=30` in `.env` (1–1440), then `docker compose up -d --wait worker` | Compose recreates the container (no rebuild); next `after=` is 30 min before the watermark |
 | Health | `docker compose ps worker` | `healthy` (a job finished within the last 3 intervals) |
 | Run the healthcheck by hand | `docker compose exec worker python -m app.worker.heartbeat; echo $?` | `0` |
 | Graceful stop | `time docker compose stop worker` | ~1 s; log ends with `SIGTERM received, shutting down` → `worker stopped` |
@@ -206,14 +209,17 @@ Each one shows a design decision working. From `repo/`, stack up.
 | Database back | `docker compose start db` | `/health/ready` 200 again without restarting `api` (`pool_pre_ping`) |
 | Network partition | `docker network disconnect money-radar_default money-radar-db-1` | `/health/ready` 503 within ~15 s instead of hanging (TCP keepalives); reconnect with `docker network connect money-radar_default money-radar-db-1` |
 | Bad config | set `POLL_INTERVAL_SECONDS=5` in `.env`, then `docker compose up -d --wait` | `api` fails to start; `docker compose logs api` lists the invalid field |
-| Unknown region pack | set `REGION_PACKS=mars` in `.env` | startup fails with `unknown region pack(s) ['mars']` (once the worker loads packs, P1.7) |
+| Unknown region pack | set `REGION_PACKS=mars` in `.env`, then `docker compose up -d worker` | worker exits at startup with `unknown region pack(s) ['mars']` and restarts in a loop until fixed (a config error, unlike a missing token) |
 | Migrations are idempotent | `docker compose up -d --wait` twice | second `migrate` run applies nothing |
 | Same message recorded twice | `test_recording_twice_keeps_one_row` (integration tests, section 6) | first insert returns True, second False; one row (`ON CONFLICT DO NOTHING` on `gmail_id`) |
 | Forged "pass" header ignored | `uv run pytest tests/unit/test_dmarc.py -v -k "added_by_the_sender or comments or untrusted"` (from `backend/`) | Gmail's own (first) verdict wins; a `dmarc=pass` added by the sender or hidden in a comment doesn't count |
 | Lookalike domain | `uv run pytest tests/unit/test_dmarc.py -v -k misaligned` (from `backend/`) | `bank.example.evil.example` / `notbank.example` → `dmarc=misaligned`, quarantined |
 | Mixed-case domain rejected by the DB | `docker compose exec db psql -U money_radar -d money_radar -c "insert into sender_registry (domain, status) values ('HDFC.example', 'learned')"` | `violates check constraint "ck_sender_registry_domain_lowercase"` |
 | Worker without a Gmail token | `mv secrets/gmail/gmail_token.json secrets/gmail/hold.json && docker compose restart worker` | one `poll skipped: No Gmail token …` error per tick; worker stays up and healthy (no restart loop). Move it back and restart |
-| Worker stopped mid-poll | `docker compose kill -s SIGKILL worker`, then `docker compose up -d worker` | next start polls again; recording is idempotent (unique `gmail_id`), so a repeated poll is harmless |
+| Worker stopped mid-poll | `docker compose kill -s SIGKILL worker`, then `docker compose up -d worker` | the killed poll's transaction rolls back, so the watermark didn't move; the next tick redoes the same window, and recording is idempotent (unique `gmail_id`) |
+| Overlap re-reads, never duplicates | set `POLL_OVERLAP_MINUTES=1440`, `docker compose up -d --wait worker` | `listed=<all mail of the last day> recorded=0`: everything re-listed, nothing re-downloaded or re-inserted. Set it back afterwards |
+| Poison message | `DB_HOST=127.0.0.1 DB_PORT=5433 uv run --env-file ../.env pytest -m integration tests/integration/test_poller.py -v -k "poison or auth_check"` (from `backend/`) | the bad message gets a `failed` row (`error = parse: ValueError`), the others are recorded, the watermark moves; live you'd see `WARNING … message <id> recorded as failed` and `failed=1`. Find them with `select gmail_id, error from messages where status = 'failed'` |
+| Late-indexed mail, crash mid-poll, two pollers at once | `DB_HOST=127.0.0.1 DB_PORT=5433 uv run --env-file ../.env pytest -m integration tests/integration/test_poller.py -v` (from `backend/`) | overlap picks up late mail; a crash leaves the watermark unmoved; a second poller blocks on the `sync_state` row lock |
 | Invalid status rejected by the DB | `docker compose exec db psql -U money_radar -d money_radar -c "insert into messages (gmail_id, received_at, status, pipeline_version) values ('x', now(), 'banana', 1)"` | `invalid input value for enum message_status: "banana"`; nothing inserted |
 
 ## 11. Troubleshooting

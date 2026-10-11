@@ -10,8 +10,13 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
 from app.pipeline.gmail.auth import load_credentials
-from app.pipeline.gmail.parse import parse_message
-from app.pipeline.gmail.source import HistoryDelta, HistoryExpiredError, MailMessage
+from app.pipeline.gmail.parse import parse_message, received_at_of
+from app.pipeline.gmail.source import (
+    HistoryDelta,
+    HistoryExpiredError,
+    MailMessage,
+    MessageParseError,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -91,4 +96,7 @@ class GmailMailSource:
             .get(userId=_USER, id=message_id, format="full")
             .execute(num_retries=_RETRIES)
         )
-        return parse_message(raw)
+        try:
+            return parse_message(raw)
+        except Exception as e:  # parsing is pure: any error is about this message's data
+            raise MessageParseError(message_id, received_at_of(raw)) from e

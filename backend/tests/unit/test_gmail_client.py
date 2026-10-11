@@ -10,7 +10,7 @@ import pytest
 from googleapiclient.errors import HttpError
 
 from app.pipeline.gmail.client import GmailMailSource
-from app.pipeline.gmail.source import HistoryExpiredError
+from app.pipeline.gmail.source import HistoryExpiredError, MessageParseError
 
 
 def _http_error(status: int) -> HttpError:
@@ -128,3 +128,39 @@ def test_get_message_fetches_full_format_and_parses() -> None:
 
     assert msg.id == "m1"
     messages.get.assert_called_with(userId="me", id="m1", format="full")
+
+
+def test_get_message_that_wont_parse_raises_message_parse_error() -> None:
+    service = MagicMock()
+    service.users().messages().get().execute.return_value = {
+        "id": "m1",
+        "internalDate": "1700000000000",  # threadId missing
+        "payload": {},
+    }
+
+    with pytest.raises(MessageParseError) as caught:
+        GmailMailSource(service).get_message("m1")
+
+    assert caught.value.message_id == "m1"
+    assert caught.value.received_at is not None
+    assert caught.value.received_at.year == 2023  # internalDate still recovered
+    assert isinstance(caught.value.__cause__, ValueError)
+
+
+def test_get_message_parse_error_without_readable_date() -> None:
+    service = MagicMock()
+    service.users().messages().get().execute.return_value = {"id": "m1", "internalDate": "x"}
+
+    with pytest.raises(MessageParseError) as caught:
+        GmailMailSource(service).get_message("m1")
+
+    assert caught.value.received_at is None
+
+
+def test_get_message_http_errors_are_not_parse_errors() -> None:
+    # A Gmail/network failure must abort the poll (retry next tick), not mark mail failed.
+    service = MagicMock()
+    service.users().messages().get().execute.side_effect = _http_error(500)
+
+    with pytest.raises(HttpError):
+        GmailMailSource(service).get_message("m1")

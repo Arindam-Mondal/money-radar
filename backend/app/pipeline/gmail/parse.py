@@ -23,9 +23,9 @@ def parse_message(raw: Message) -> MailMessage:
     """
     msg_id = raw.get("id")
     thread_id = raw.get("threadId")
-    internal_date = raw.get("internalDate")
-    if not msg_id or not thread_id or not internal_date:
-        raise ValueError("Gmail message missing id, threadId or internalDate")
+    received_at = received_at_of(raw)
+    if not msg_id or not thread_id or received_at is None:
+        raise ValueError("Gmail message missing id, threadId or a valid internalDate")
 
     payload = raw.get("payload", {})
     headers = tuple((h.get("name", ""), h.get("value", "")) for h in payload.get("headers", []))
@@ -33,11 +33,19 @@ def parse_message(raw: Message) -> MailMessage:
     return MailMessage(
         id=msg_id,
         thread_id=thread_id,
-        received_at=datetime.fromtimestamp(int(internal_date) / 1000, tz=UTC),
+        received_at=received_at,
         headers=headers,
         text_body=_find_body(payload, "text/plain"),
         html_body=_find_body(payload, "text/html"),
     )
+
+
+def received_at_of(raw: Message) -> datetime | None:
+    """Gmail internalDate (epoch milliseconds) as UTC, or None if missing or malformed."""
+    try:
+        return datetime.fromtimestamp(int(raw.get("internalDate", "")) / 1000, tz=UTC)
+    except (ValueError, OverflowError, OSError):  # not a number / out of range
+        return None
 
 
 def _find_body(part: MessagePart, mime_type: str) -> str | None:

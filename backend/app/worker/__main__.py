@@ -10,6 +10,7 @@ from apscheduler.events import EVENT_JOB_ERROR, EVENT_JOB_EXECUTED, JobExecution
 from apscheduler.schedulers.blocking import BlockingScheduler
 
 from app.config import Settings, get_settings
+from app.regions import load_region_packs
 from app.worker.heartbeat import HEARTBEAT_FILE, beat
 from app.worker.jobs import poll_gmail
 
@@ -17,14 +18,15 @@ logger = logging.getLogger("money_radar.worker")
 
 
 def build_scheduler(settings: Settings, heartbeat_file: Path = HEARTBEAT_FILE) -> BlockingScheduler:
+    packs = load_region_packs(settings.region_packs)  # unknown pack: fail at startup, not per tick
     scheduler = BlockingScheduler(timezone=UTC)
     scheduler.add_job(
         poll_gmail,
         "interval",
         seconds=settings.poll_interval_seconds,
-        args=[settings.gmail_token_file],
+        args=[settings, packs],
         id="poll_gmail",
-        max_instances=1,  # never two polls at once (one token writer, one cursor)
+        max_instances=1,  # one poll at a time here; poller's row lock covers other processes
         coalesce=True,  # after a stall, run once, not once per missed tick
         misfire_grace_time=30,  # a run may still start up to 30 s late
         next_run_time=datetime.now(UTC),  # first tick right away, not after one interval

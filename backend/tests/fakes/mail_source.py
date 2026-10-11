@@ -6,7 +6,12 @@ import re
 from collections.abc import Iterator
 from datetime import datetime
 
-from app.pipeline.gmail.source import HistoryDelta, HistoryExpiredError, MailMessage
+from app.pipeline.gmail.source import (
+    HistoryDelta,
+    HistoryExpiredError,
+    MailMessage,
+    MessageParseError,
+)
 
 # build_query emits epoch seconds. The fake applies them exactly: after:<ts> inclusive,
 # before:<ts> exclusive. Real Gmail drifts by up to ~1 minute at the edges (measured), which
@@ -49,6 +54,7 @@ class FakeMailSource:
         self._log: list[tuple[int, str]] = []  # (history id when added, message id)
         self._history_id = start_history_id
         self._oldest_valid = start_history_id
+        self._unparseable: set[str] = set()
         self.queries: list[str] = []
         self.fetched: list[str] = []
 
@@ -59,6 +65,11 @@ class FakeMailSource:
             self._history_id += 1
             self._messages[message.id] = message
             self._log.append((self._history_id, message.id))
+
+    def add_unparseable(self, *messages: MailMessage) -> None:
+        """Listed by searches like any message, but get_message raises MessageParseError."""
+        self.add(*messages)
+        self._unparseable.update(message.id for message in messages)
 
     def expire_history(self) -> None:
         """Simulate Gmail dropping old history: any cursor before now gets a 404."""
@@ -91,6 +102,9 @@ class FakeMailSource:
 
     def get_message(self, message_id: str) -> MailMessage:
         self.fetched.append(message_id)
+        if message_id in self._unparseable:
+            received_at = self._messages[message_id].received_at
+            raise MessageParseError(message_id, received_at) from ValueError("bad MIME")
         try:
             return self._messages[message_id]
         except KeyError:

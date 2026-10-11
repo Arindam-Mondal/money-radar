@@ -1,40 +1,66 @@
-"""Worker: poll job, heartbeat file, scheduler wiring. No real Gmail, no real signals."""
+"""Worker: poll job wiring, heartbeat file, scheduler wiring. No real Gmail, no real signals."""
 
 import logging
 import threading
 import time
 from datetime import timedelta
 from pathlib import Path
+from typing import Any
+from unittest.mock import MagicMock
 
 import pytest
 
 from app.config import Settings
 from app.pipeline.gmail.client import GmailMailSource
+from app.pipeline.gmail.poller import PollResult
+from app.regions import load_region_packs
+from app.worker import jobs
 from app.worker.__main__ import build_scheduler
 from app.worker.heartbeat import beat, is_fresh
-from app.worker.jobs import poll_gmail
 from tests.fakes.mail_source import FakeMailSource
 
+PACKS = load_region_packs(["india"])
 
-def test_poll_logs_history_id(
+
+def test_poll_wires_settings_into_poll_once(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    fake = FakeMailSource(start_history_id=4242)
+    fake = FakeMailSource()
+    calls: list[dict[str, Any]] = []
+
+    def fake_poll_once(session: object, source: object, packs: object, **kwargs: Any) -> PollResult:
+        calls.append({"source": source, "packs": packs, **kwargs})
+        return PollResult(
+            searched_after=kwargs["now"], listed=3, recorded=1, unverified=0, failed=1
+        )
+
     monkeypatch.setattr(GmailMailSource, "from_token_file", lambda path: fake)
+    monkeypatch.setattr(jobs, "get_sessionmaker", lambda: MagicMock())  # no real DB
+    monkeypatch.setattr(jobs, "poll_once", fake_poll_once)
+    settings = Settings(gmail_token_file=tmp_path / "token.json", poll_overlap_minutes=7)
 
     with caplog.at_level(logging.INFO, logger="money_radar.worker"):
-        poll_gmail(tmp_path / "token.json")
+        jobs.poll_gmail(settings, PACKS)
 
-    assert "poll tick ok: history_id=4242" in caplog.text
+    assert calls[0]["source"] is fake
+    assert calls[0]["overlap"] == timedelta(minutes=7)
+    assert calls[0]["packs"] is PACKS
+    assert "listed=3 recorded=1 unverified=0 failed=1" in caplog.text
 
 
 def test_poll_without_token_logs_and_does_not_raise(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
+    settings = Settings(gmail_token_file=tmp_path / "absent.json")
     with caplog.at_level(logging.ERROR, logger="money_radar.worker"):
-        poll_gmail(tmp_path / "absent.json")  # real load_credentials -> GmailAuthError
+        jobs.poll_gmail(settings, PACKS)  # real load_credentials -> GmailAuthError, no DB use
 
     assert "poll skipped: No Gmail token" in caplog.text
+
+
+def test_unknown_region_pack_fails_at_startup(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="unknown region pack"):
+        build_scheduler(Settings(region_packs=("mars",)), tmp_path / "hb")
 
 
 def test_heartbeat_missing_file_is_not_fresh(tmp_path: Path) -> None:

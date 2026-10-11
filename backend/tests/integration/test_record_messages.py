@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.db.models import Message, MessageStatus
 from app.pipeline import PIPELINE_VERSION
-from app.pipeline.gmail.record import record_message, unseen_gmail_ids
+from app.pipeline.gmail.record import record_failed, record_message, unseen_gmail_ids
 from tests.fakes.mail_source import make_message
 
 pytestmark = pytest.mark.integration
@@ -72,3 +72,13 @@ def test_unseen_gmail_ids_filters_known_keeps_order_and_dedupes(session: Session
 
 def test_unseen_gmail_ids_empty_input(session: Session) -> None:
     assert unseen_gmail_ids(session, []) == []
+
+
+def test_record_failed_stores_status_and_reason_once(session: Session) -> None:
+    first = record_failed(session, "gm-poison", received_at=RECEIVED, error="parse: ValueError")
+    again = record_failed(session, "gm-poison", received_at=RECEIVED, error="parse: ValueError")
+
+    row = session.scalars(select(Message).where(Message.gmail_id == "gm-poison")).one()
+    assert (first, again) == (True, False)
+    assert row.status is MessageStatus.FAILED
+    assert row.error == "parse: ValueError"

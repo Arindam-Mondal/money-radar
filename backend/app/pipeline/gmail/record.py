@@ -1,6 +1,7 @@
 """Record stage (ING-4): one `messages` row per Gmail message, however often it's fetched."""
 
 from collections.abc import Iterable
+from datetime import datetime
 
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
@@ -20,14 +21,44 @@ def record_message(
     workers (or a poll and a backfill) recording the same message can't both insert it.
     Does not commit: the caller owns the transaction.
     """
+    return _insert(
+        session,
+        gmail_id=message.id,
+        received_at=message.received_at,
+        status=MessageStatus.FETCHED,
+        pipeline_version=pipeline_version,
+    )
+
+
+def record_failed(
+    session: Session,
+    gmail_id: str,
+    *,
+    received_at: datetime,
+    error: str,
+    pipeline_version: int = PIPELINE_VERSION,
+) -> bool:
+    """Insert a `failed` row for a message that can't be processed. False if already recorded.
+
+    The row keeps a poison message visible (and re-runnable by an explicit reprocess)
+    instead of letting it vanish behind the poll watermark. `error` is a short reason
+    such as "parse: ValueError": class names only, never exception text, which can
+    quote headers or body. Same idempotency as record_message; does not commit.
+    """
+    return _insert(
+        session,
+        gmail_id=gmail_id,
+        received_at=received_at,
+        status=MessageStatus.FAILED,
+        error=error,
+        pipeline_version=pipeline_version,
+    )
+
+
+def _insert(session: Session, **values: object) -> bool:
     statement = (
         insert(Message)
-        .values(
-            gmail_id=message.id,
-            received_at=message.received_at,
-            status=MessageStatus.FETCHED,
-            pipeline_version=pipeline_version,
-        )
+        .values(**values)
         .on_conflict_do_nothing(index_elements=[Message.gmail_id])
         .returning(Message.id)
     )

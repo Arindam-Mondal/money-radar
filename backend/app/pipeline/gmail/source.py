@@ -10,6 +10,19 @@ class HistoryExpiredError(Exception):
     """The start history id is too old for Gmail; caller must fall back to a full sync."""
 
 
+class MessageParseError(Exception):
+    """A fetched message can't be turned into a MailMessage, and never will be.
+
+    Retrying won't help, so the poller records it as `failed` and moves on: one bad
+    message must not block every later poll (a "poison message").
+    """
+
+    def __init__(self, message_id: str, received_at: datetime | None) -> None:
+        super().__init__(f"message {message_id} could not be parsed")
+        self.message_id = message_id
+        self.received_at = received_at  # Gmail internalDate if it was readable, else None
+
+
 @dataclass(frozen=True, slots=True)
 class MailMessage:
     id: str  # Gmail message id (hex string) -> messages.gmail_id

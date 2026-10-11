@@ -27,14 +27,15 @@ def pg_enum(enum_class: type[StrEnum], name: str) -> Enum:
 
 
 class SyncState(Base):
-    """Single-row cursor for the Gmail incremental poller (ING-1)."""
+    """Single-row watermark for the Gmail incremental poller (ING-1)."""
 
     __tablename__ = "sync_state"
     __table_args__ = (CheckConstraint("id = 1", name="single_row"),)
 
     # autoincrement=False: no SERIAL sequence; the only valid id is 1.
     id: Mapped[int] = mapped_column(primary_key=True, default=1, autoincrement=False)
-    history_id: Mapped[str | None] = mapped_column(Text)
+    # Start time of the last successful poll; None until the first poll commits.
+    polled_until: Mapped[datetime | None]
     updated_at: Mapped[datetime] = mapped_column(server_default=func.now(), onupdate=func.now())
 
 
