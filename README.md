@@ -417,7 +417,7 @@ flowchart LR
 ```
 
 - [x] **P0 Foundations**: project setup, Docker, database, health checks, CI
-- [ ] **P1 Gmail ingestion**: OAuth, polling, backfill, sender authentication
+- [x] **P1 Gmail ingestion**: OAuth, polling, backfill, sender authentication (Gate 1: backfill is idempotent)
 - [ ] **P2 Privacy layer**: tokenization, encrypted vault, masking, canary tests
 - [ ] **P3 Classification**: pluggable classifier, retries, sender registry
 - [ ] **P4 Extraction**: bank parsers, local LLM fallback, review queue

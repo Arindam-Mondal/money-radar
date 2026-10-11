@@ -253,6 +253,36 @@ Ingests past mail for a range of calendar days (ING-2). `--from` and `--to` are 
 
 Messages are committed every 100, and a range is marked covered only after its last page. Stopping a backfill (Ctrl+C, crash, network) keeps the finished batches and leaves the range uncovered; the same command resumes it.
 
+### Prove it's idempotent (Gate 1)
+
+Gate 1 closes P1: backfilling a month twice must give identical results and zero duplicates. The automated proof is `tests/integration/test_gate1.py`:
+
+| Run (from `backend/`, stack up) | It proves |
+|---|---|
+| `DB_HOST=127.0.0.1 DB_PORT=5433 uv run --env-file ../.env pytest -m integration tests/integration/test_gate1.py -v` | one backfill records exactly the oracle's messages and statuses; a second run writes **nothing** (same ids and same `xmin` row versions), even with `sync_ranges` forgotten; a crash after any number of downloads, the month split into chunks in any order, poll + backfill + re-sweep together, and Gmail listing ids twice all end in the same rows as one clean run, with no message downloaded twice; the same holds through the job queue |
+
+The live check uses your real mailbox: forget a backfilled month's coverage, so the second run really searches Gmail again, and compare a fingerprint of the month's rows before and after. `xmin` is the id of the transaction that wrote each row version, so a fingerprint that includes it changes if a row is rewritten, even with identical values. From `repo/`, stack up, with a month you've already backfilled (September here):
+
+1. Fingerprint the month. Git Bash:
+
+   ```bash
+   docker compose exec -T db psql -U money_radar -d money_radar <<'SQL'
+   select count(*) as rows, count(distinct gmail_id) as distinct_ids,
+          md5(string_agg(id || ':' || gmail_id || ':' || status || ':' || coalesce(auth_result, '')
+                         || ':' || xmin::text, ',' order by gmail_id)) as fingerprint
+   from messages
+   where received_at >= timestamptz '2026-09-01 00:00 Asia/Kolkata'
+     and received_at <  timestamptz '2026-10-01 00:00 Asia/Kolkata';
+   SQL
+   ```
+
+   PowerShell: put the same SQL in a `@' … '@` here-string and pipe it: `@'<SQL>'@ | docker compose exec -T db psql -U money_radar -d money_radar` (the closing `'@` must start its line).
+2. Forget its coverage: `docker compose exec db psql -U money_radar -d money_radar -c "delete from sync_ranges where start_date = '2026-09-01' and end_date = '2026-10-01'"` (`DELETE 1`).
+3. Queue it again: `POST /backfill` with `{"start":"2026-09-01","end":"2026-09-30"}` (section 10), and follow it until `done`.
+4. Fingerprint again (step 1).
+
+Expect: the job ends `done` with `listed` = the month's mail and `recorded: 0`; both fingerprints are **identical** (rows = distinct_ids, same md5); `sync_ranges` has the September row again. Measured on a real mailbox: 266 listed, 0 recorded, same md5, under a second, because already-recorded ids are skipped before any download.
+
 ## 11. Failure scenarios worth trying
 
 Each one shows a design decision working. From `repo/`, stack up.
@@ -280,6 +310,7 @@ Each one shows a design decision working. From `repo/`, stack up.
 | Backfill reaching into today | `docker compose exec worker python -m app.pipeline.gmail.backfill --from <yesterday> --to <tomorrow>` | covers yesterday only; `sync_ranges` ends at today |
 | Job queue: two workers, dead worker, retries, poison job | `DB_HOST=127.0.0.1 DB_PORT=5433 uv run --env-file ../.env pytest -m integration tests/integration/test_jobqueue.py -v` (from `backend/`) | two workers never get the same job (`SKIP LOCKED`); an orphaned job is re-claimed after its lease; the slow old worker's writes are refused; retries wait 1/5/15 min; a job fails after 3 attempts; the claim uses the partial index `ix_jobs_claimable` even with 20k finished jobs |
 | Re-sweep catches what the poller missed | `DB_HOST=127.0.0.1 DB_PORT=5433 uv run --env-file ../.env pytest -m integration -v -k resweep` (from `backend/`) | a covered day is searched again and late mail is recorded, no `sync_ranges` row is added; the days are in `TZ` (20:00 UTC on Mar 15 is already Mar 16 in IST); a restart doesn't queue the same re-sweep twice; `"resweep": "false"` (a string) fails the job instead of being read as true |
+| Gmail lists an id twice (pages shift while new mail arrives) | `DB_HOST=127.0.0.1 DB_PORT=5433 uv run --env-file ../.env pytest -m integration tests/integration/test_gate1.py -v -k listed_twice` (from `backend/`) | every id listed twice, each one downloaded and recorded once: the in-batch de-duplication and the later batches' already-recorded pre-check handle it, and `ON CONFLICT` is the last line of defence |
 | Late-indexed mail, crash mid-poll, two pollers at once | `DB_HOST=127.0.0.1 DB_PORT=5433 uv run --env-file ../.env pytest -m integration tests/integration/test_poller.py -v` (from `backend/`) | overlap picks up late mail; a crash leaves the watermark unmoved; a second poller blocks on the `sync_state` row lock |
 | Invalid status rejected by the DB | `docker compose exec db psql -U money_radar -d money_radar -c "insert into messages (gmail_id, received_at, status, pipeline_version) values ('x', now(), 'banana', 1)"` | `invalid input value for enum message_status: "banana"`; nothing inserted |
 
