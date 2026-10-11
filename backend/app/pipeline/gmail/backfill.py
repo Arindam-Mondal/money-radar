@@ -65,6 +65,7 @@ def backfill(
     zone: ZoneInfo,
     now: datetime,
     on_progress: ProgressCallback | None = None,
+    use_coverage: bool = True,
 ) -> BackfillResult:
     """Ingest every uncovered day of `requested`. COMMITS: once per batch, once per gap.
 
@@ -74,6 +75,10 @@ def backfill(
 
     `on_progress` runs after every batch and after every finished gap, in the same
     transaction, so saved progress never runs ahead of saved messages.
+
+    `use_coverage=False` is the nightly re-sweep: search the whole range even if it is
+    covered (mail Gmail indexed late), and record no coverage (sync_ranges stays the
+    record of requested backfills). Already-recorded ids are still skipped before download.
     """
     packs = list(packs)
     today = now.astimezone(zone).date()
@@ -81,8 +86,11 @@ def backfill(
         return BackfillResult(None, [], 0, IngestCounts())
     requested = DateRange(requested.start, min(requested.end, today))
 
-    covered = [DateRange(r.start_date, r.end_date) for r in session.scalars(select(SyncRange))]
-    gaps = compute_gaps(requested, covered)
+    if use_coverage:
+        covered = [DateRange(r.start_date, r.end_date) for r in session.scalars(select(SyncRange))]
+        gaps = compute_gaps(requested, covered)
+    else:
+        gaps = [requested]
     listed = 0
     counts = IngestCounts()
     gaps_done = 0
@@ -115,11 +123,17 @@ def backfill(
             session.commit()
             logger.info("backfill: %d listed, %d recorded so far", listed, counts.recorded)
         # Only now, after the last page: the whole gap is in `messages`.
-        session.add(SyncRange(start_date=gap.start, end_date=gap.end))
+        if use_coverage:
+            session.add(SyncRange(start_date=gap.start, end_date=gap.end))
         gaps_done += 1
         report()
         session.commit()
-        logger.info("backfill: %s .. %s covered", gap.start, gap.end - timedelta(days=1))
+        logger.info(
+            "backfill: %s .. %s %s",
+            gap.start,
+            gap.end - timedelta(days=1),
+            "covered" if use_coverage else "re-swept",
+        )
     return BackfillResult(requested, gaps, listed, counts)
 
 

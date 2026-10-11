@@ -96,6 +96,17 @@ def test_backfill_job_polls_at_the_configured_interval(tmp_path: Path) -> None:
     assert job.max_instances == 1  # ticks are skipped while a backfill runs
 
 
+def test_resweep_is_queued_at_3am_local_and_at_startup(tmp_path: Path) -> None:
+    scheduler = build_scheduler(Settings(tz="Asia/Kolkata"), tmp_path / "hb")
+
+    job = scheduler.get_job("enqueue_resweep")
+
+    assert str(job.trigger.timezone) == "Asia/Kolkata"
+    fields = {f.name: str(f) for f in job.trigger.fields}
+    assert (fields["hour"], fields["minute"]) == ("3", "0")
+    assert job.next_run_time is not None  # first run at startup, not only at 03:00
+
+
 def test_skipped_backfill_ticks_are_not_logged() -> None:
     quiet = worker_main._QuietSkippedBackfillTicks()
 
@@ -115,6 +126,7 @@ def test_scheduler_runs_first_tick_immediately_and_stops(
     # Real scheduler in a thread: first tick (no token -> logged error) must still beat.
     monkeypatch.setenv("GMAIL_TOKEN_FILE", str(tmp_path / "absent.json"))
     monkeypatch.setattr(worker_main, "run_backfills", lambda *args: 0)  # no DB in unit tests
+    monkeypatch.setattr(worker_main, "enqueue_resweep", lambda *args: None)
     hb = tmp_path / "hb"
     scheduler = build_scheduler(Settings(), hb)
     thread = threading.Thread(target=scheduler.start, daemon=True)

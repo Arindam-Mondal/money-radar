@@ -10,7 +10,7 @@ from zoneinfo import ZoneInfo
 import httplib2
 import pytest
 from googleapiclient.errors import HttpError
-from sqlalchemy import Connection, delete, select
+from sqlalchemy import Connection, delete, select, update
 from sqlalchemy.orm import Session, sessionmaker
 
 from app import jobqueue
@@ -21,7 +21,7 @@ from app.pipeline.gmail import backfill as backfill_module
 from app.pipeline.gmail.auth import GmailAuthError
 from app.pipeline.gmail.source import MailMessage, MailSource
 from app.regions import load_region_packs
-from app.worker.backfills import run_backfills
+from app.worker.backfills import enqueue_resweep, run_backfills
 from tests.fakes.mail_source import FakeMailSource, make_message
 
 pytestmark = pytest.mark.integration
@@ -61,6 +61,10 @@ def _run(sessions: sessionmaker[Session], source: MailSource, *, clock: datetime
     return run_backfills(
         Settings(), PACKS, sessions=sessions, source_factory=lambda _: source, clock=lambda: clock
     )
+
+
+def _resweep(sessions: sessionmaker[Session], at: datetime = NOW) -> int | None:
+    return enqueue_resweep(Settings(), sessions=sessions, clock=lambda: at)
 
 
 def _enqueue(session: Session, params: dict[str, Any] = JAN) -> int:
@@ -163,6 +167,83 @@ def test_a_job_not_yet_due_is_left_alone(session: Session, sessions: sessionmake
 
     assert _run(sessions, FakeMailSource()) == 0
     assert _job(session, job.id).status is JobStatus.QUEUED
+
+
+# --- nightly re-sweep ------------------------------------------------------------------------
+
+
+def test_a_resweep_job_searches_covered_days_again(
+    session: Session, sessions: sessionmaker[Session]
+) -> None:
+    session.add(SyncRange(start_date=date(2026, 3, 13), end_date=date(2026, 3, 15)))
+    job_id = _enqueue(session, {"start": "2026-03-13", "end": "2026-03-15", "resweep": True})
+    source = FakeMailSource()
+    source.add(_mail("rb-late", date(2026, 3, 14)))  # indexed after the poller's window
+
+    _run(sessions, source)
+
+    job = _job(session, job_id)
+    assert (job.status, job.progress["gaps_total"], job.progress["recorded"]) == (
+        JobStatus.DONE,
+        1,
+        1,
+    )
+    assert _recorded(session, "rb-late") == 1
+    assert len(session.scalars(select(SyncRange)).all()) == 1  # no coverage added
+
+
+def test_resweep_must_be_a_real_boolean(session: Session, sessions: sessionmaker[Session]) -> None:
+    job_id = _enqueue(session, {**JAN, "resweep": "false"})  # truthy string: refuse, don't guess
+
+    _run(sessions, FakeMailSource())
+
+    assert (_job(session, job_id).status, _job(session, job_id).error) == (
+        JobStatus.FAILED,
+        "InvalidJobParams",
+    )
+
+
+def test_enqueue_resweep_queues_the_last_two_complete_days_in_tz(
+    session: Session, sessions: sessionmaker[Session]
+) -> None:
+    # 20:00 UTC on Mar 15 is 01:30 IST on Mar 16: "today" is the 16th, not the 15th.
+    late_evening_utc = datetime(2026, 3, 15, 20, 0, tzinfo=UTC)
+
+    job_id = _resweep(sessions, late_evening_utc)
+
+    assert job_id is not None
+    job = _job(session, job_id)
+    assert job.params == {"start": "2026-03-14", "end": "2026-03-16", "resweep": True}
+    assert job.status is JobStatus.QUEUED
+
+
+def test_enqueue_resweep_once_per_day_whatever_happened_to_the_first(
+    session: Session, sessions: sessionmaker[Session]
+) -> None:
+    first = _resweep(sessions)
+    assert first is not None
+    session.execute(update(Job).where(Job.id == first).values(status=JobStatus.DONE))
+    session.flush()
+
+    restart = _resweep(sessions, NOW + timedelta(hours=1))
+    next_night = _resweep(sessions, NOW + timedelta(days=1))
+
+    assert restart is None  # same days already queued (and done): a restart adds nothing
+    assert next_night is not None
+    # Mar 14 again: consecutive nights overlap by a day, so one missed night loses nothing.
+    assert _job(session, next_night).params == {
+        "start": "2026-03-14",
+        "end": "2026-03-16",
+        "resweep": True,
+    }
+
+
+def test_a_user_backfill_of_the_same_days_does_not_block_the_resweep(
+    session: Session, sessions: sessionmaker[Session]
+) -> None:
+    _enqueue(session, {"start": "2026-03-13", "end": "2026-03-15"})  # same days, no resweep flag
+
+    assert _resweep(sessions) is not None
 
 
 # --- temporary errors: retry, then resume ------------------------------------------------

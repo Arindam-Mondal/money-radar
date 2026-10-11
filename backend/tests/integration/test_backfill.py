@@ -132,6 +132,21 @@ def test_a_request_starting_today_does_nothing(session: Session) -> None:
     assert _coverage(session) == []
 
 
+def test_resweep_searches_covered_days_and_adds_no_coverage(session: Session) -> None:
+    # Jan 10 was covered, then Gmail indexed one more Jan 10 mail late: only a re-sweep sees it.
+    session.add(SyncRange(start_date=date(2026, 1, 10), end_date=date(2026, 1, 11)))
+    session.flush()
+    source = FakeMailSource()
+    source.add(_mail("bf-late", _at(date(2026, 1, 10))), _mail("bf-new", _at(date(2026, 1, 11))))
+    requested = DateRange(date(2026, 1, 10), date(2026, 1, 12))
+
+    result = backfill(session, source, PACKS, requested, zone=IST, now=NOW, use_coverage=False)
+
+    assert result.gaps == [requested]  # the whole range, covered part included
+    assert _recorded(session, "bf-") == {"bf-late", "bf-new"}
+    assert _coverage(session) == [(date(2026, 1, 10), date(2026, 1, 11))]  # unchanged
+
+
 class _DiesAfter(FakeMailSource):
     """The network goes away after `limit` messages have been downloaded."""
 

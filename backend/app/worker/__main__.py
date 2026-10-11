@@ -8,10 +8,11 @@ from types import FrameType
 
 from apscheduler.events import EVENT_JOB_ERROR, EVENT_JOB_EXECUTED, JobExecutionEvent
 from apscheduler.schedulers.blocking import BlockingScheduler
+from apscheduler.triggers.cron import CronTrigger
 
 from app.config import Settings, get_settings
 from app.regions import load_region_packs
-from app.worker.backfills import run_backfills
+from app.worker.backfills import RESWEEP_AT, enqueue_resweep, run_backfills
 from app.worker.heartbeat import HEARTBEAT_FILE, beat
 from app.worker.jobs import poll_gmail
 
@@ -51,6 +52,19 @@ def build_scheduler(settings: Settings, heartbeat_file: Path = HEARTBEAT_FILE) -
         coalesce=True,
         misfire_grace_time=30,
         next_run_time=datetime.now(UTC),  # pick up queued (or orphaned) jobs at startup
+    )
+    scheduler.add_job(
+        enqueue_resweep,
+        # Wall-clock time in the user's zone (DST-aware), not "every 24 h from startup".
+        CronTrigger(hour=RESWEEP_AT.hour, minute=RESWEEP_AT.minute, timezone=settings.zone),
+        args=[settings],
+        id="enqueue_resweep",
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=3600,
+        # Also once at startup: a laptop asleep at 03:00 still gets last night's re-sweep.
+        # enqueue_resweep skips a re-sweep that was already queued, so restarts are free.
+        next_run_time=datetime.now(UTC),
     )
 
     def _on_job_done(event: JobExecutionEvent) -> None:
