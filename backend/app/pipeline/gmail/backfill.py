@@ -9,7 +9,7 @@ page. Running the same backfill twice therefore fetches nothing the second time.
 
 import argparse
 import logging
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from itertools import batched
@@ -39,6 +39,14 @@ BATCH_SIZE: Final = 100
 # little beyond each edge; mail from a neighbouring day is recorded once anyway.
 EDGE_PAD: Final = timedelta(minutes=10)
 
+# Called with the progress so far, inside the transaction about to be committed; returns
+# False to stop (the job queue uses this for its heartbeat and to detect a lost lease).
+ProgressCallback = Callable[[dict[str, int]], bool]
+
+
+class BackfillStopped(Exception):
+    """The progress callback asked to stop; the current batch was not committed."""
+
 
 @dataclass(frozen=True, slots=True)
 class BackfillResult:
@@ -56,12 +64,16 @@ def backfill(
     *,
     zone: ZoneInfo,
     now: datetime,
+    on_progress: ProgressCallback | None = None,
 ) -> BackfillResult:
     """Ingest every uncovered day of `requested`. COMMITS: once per batch, once per gap.
 
     Only complete days are backfilled: the request is cut off at today (in `zone`), since
     marking a day covered while mail can still arrive for it would hide that mail from
     every later backfill. Today's mail is the poller's job.
+
+    `on_progress` runs after every batch and after every finished gap, in the same
+    transaction, so saved progress never runs ahead of saved messages.
     """
     packs = list(packs)
     today = now.astimezone(zone).date()
@@ -73,6 +85,23 @@ def backfill(
     gaps = compute_gaps(requested, covered)
     listed = 0
     counts = IngestCounts()
+    gaps_done = 0
+
+    def report() -> None:
+        progress = {
+            "gaps_total": len(gaps),
+            "gaps_done": gaps_done,
+            "listed": listed,
+            "recorded": counts.recorded,
+            "unverified": counts.unverified,
+            "failed": counts.failed,
+        }
+        if on_progress is not None and not on_progress(progress):
+            session.rollback()  # don't commit a batch we're not allowed to report
+            raise BackfillStopped
+
+    report()  # up front: "0 of N gaps" right away, and a job with no gaps still says so
+    session.commit()
     for gap in gaps:
         query = build_query(
             packs,
@@ -82,10 +111,13 @@ def backfill(
         for batch in batched(source.iter_message_ids(query), BATCH_SIZE):
             listed += len(batch)
             counts += ingest_messages(session, source, batch, now=now)
+            report()
             session.commit()
             logger.info("backfill: %d listed, %d recorded so far", listed, counts.recorded)
         # Only now, after the last page: the whole gap is in `messages`.
         session.add(SyncRange(start_date=gap.start, end_date=gap.end))
+        gaps_done += 1
+        report()
         session.commit()
         logger.info("backfill: %s .. %s covered", gap.start, gap.end - timedelta(days=1))
     return BackfillResult(requested, gaps, listed, counts)

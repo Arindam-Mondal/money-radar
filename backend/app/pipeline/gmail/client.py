@@ -123,14 +123,14 @@ class GmailMailSource:
             try:
                 return request.execute(num_retries=_RETRIES)
             except HttpError as e:
-                if not _is_rate_limit(e):
+                if not is_rate_limit(e):
                     raise
                 logger.warning("Gmail rate limit reached; waiting %.0f s", wait)
                 self._sleep(wait)
         return request.execute(num_retries=_RETRIES)  # last try: a rate limit now propagates
 
 
-def _is_rate_limit(error: HttpError) -> bool:
+def is_rate_limit(error: HttpError) -> bool:
     """429, or a 403 whose reason is a rate limit (a 403 can also mean "no permission")."""
     if error.resp.status == HTTPStatus.TOO_MANY_REQUESTS:
         return True

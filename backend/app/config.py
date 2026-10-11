@@ -32,6 +32,8 @@ class Settings(BaseSettings):
     poll_interval_seconds: int = Field(default=120, ge=30, le=3600)
     # Each poll re-searches this far before the saved watermark (search index lag, clock skew).
     poll_overlap_minutes: int = Field(default=10, ge=1, le=1440)
+    # How often the worker checks the job queue for queued backfills (when idle).
+    job_poll_seconds: int = Field(default=30, ge=5, le=300)
     # REGION_PACKS=india,us  (NoDecode: a plain comma list, not the JSON pydantic expects)
     region_packs: Annotated[tuple[str, ...], NoDecode] = ("india",)
     # IANA zone for calendar days: a 00:30 IST alert belongs to that IST day, not the UTC one.

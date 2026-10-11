@@ -11,10 +11,20 @@ from apscheduler.schedulers.blocking import BlockingScheduler
 
 from app.config import Settings, get_settings
 from app.regions import load_region_packs
+from app.worker.backfills import run_backfills
 from app.worker.heartbeat import HEARTBEAT_FILE, beat
 from app.worker.jobs import poll_gmail
 
 logger = logging.getLogger("money_radar.worker")
+
+
+class _QuietSkippedBackfillTicks(logging.Filter):
+    """While a backfill runs (minutes), every run_backfills tick is skipped by design
+    (max_instances=1). APScheduler warns each time; that's expected, so drop just those."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage()
+        return not ("run_backfills" in message and "maximum number of running instances" in message)
 
 
 def build_scheduler(settings: Settings, heartbeat_file: Path = HEARTBEAT_FILE) -> BlockingScheduler:
@@ -31,6 +41,17 @@ def build_scheduler(settings: Settings, heartbeat_file: Path = HEARTBEAT_FILE) -
         misfire_grace_time=30,  # a run may still start up to 30 s late
         next_run_time=datetime.now(UTC),  # first tick right away, not after one interval
     )
+    scheduler.add_job(
+        run_backfills,
+        "interval",
+        seconds=settings.job_poll_seconds,
+        args=[settings, packs],
+        id="run_backfills",
+        max_instances=1,  # one drain loop at a time; it runs every ready job itself
+        coalesce=True,
+        misfire_grace_time=30,
+        next_run_time=datetime.now(UTC),  # pick up queued (or orphaned) jobs at startup
+    )
 
     def _on_job_done(event: JobExecutionEvent) -> None:
         beat(heartbeat_file)  # success or error: either way the scheduler loop is alive
@@ -41,6 +62,7 @@ def build_scheduler(settings: Settings, heartbeat_file: Path = HEARTBEAT_FILE) -
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s:     %(name)s - %(message)s")
+    logging.getLogger("apscheduler.scheduler").addFilter(_QuietSkippedBackfillTicks())
     settings = get_settings()  # bad config fails here, before anything is scheduled
     scheduler = build_scheduler(settings)
 

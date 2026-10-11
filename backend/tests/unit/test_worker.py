@@ -10,6 +10,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+import app.worker.__main__ as worker_main
 from app.config import Settings
 from app.pipeline.gmail.client import GmailMailSource
 from app.pipeline.gmail.poller import PollResult
@@ -86,11 +87,34 @@ def test_scheduler_job_config(tmp_path: Path) -> None:
     assert job.coalesce is True
 
 
+def test_backfill_job_polls_at_the_configured_interval(tmp_path: Path) -> None:
+    scheduler = build_scheduler(Settings(job_poll_seconds=7), tmp_path / "hb")
+
+    job = scheduler.get_job("run_backfills")
+
+    assert job.trigger.interval == timedelta(seconds=7)
+    assert job.max_instances == 1  # ticks are skipped while a backfill runs
+
+
+def test_skipped_backfill_ticks_are_not_logged() -> None:
+    quiet = worker_main._QuietSkippedBackfillTicks()
+
+    def record(message: str) -> logging.LogRecord:
+        return logging.LogRecord("apscheduler.scheduler", logging.WARNING, "", 0, message, (), None)
+
+    tail = "skipped: maximum number of running instances reached (1)"
+    skipped = f'Execution of job "run_backfills (trigger: interval[0:00:30])" {tail}'
+    other = f'Execution of job "poll_gmail (trigger: interval[0:02:00])" {tail}'
+    assert not quiet.filter(record(skipped))
+    assert quiet.filter(record(other))  # a stuck Gmail poll is still worth a warning
+
+
 def test_scheduler_runs_first_tick_immediately_and_stops(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # Real scheduler in a thread: first tick (no token -> logged error) must still beat.
     monkeypatch.setenv("GMAIL_TOKEN_FILE", str(tmp_path / "absent.json"))
+    monkeypatch.setattr(worker_main, "run_backfills", lambda *args: 0)  # no DB in unit tests
     hb = tmp_path / "hb"
     scheduler = build_scheduler(Settings(), hb)
     thread = threading.Thread(target=scheduler.start, daemon=True)
