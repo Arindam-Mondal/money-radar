@@ -11,7 +11,7 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from app.db.models import Message, MessageStatus, SyncState
-from app.pipeline.gmail import poller
+from app.pipeline.gmail import ingest
 from app.pipeline.gmail.poller import FIRST_POLL_LOOKBACK, _lock_state, poll_once
 from app.pipeline.gmail.source import MailMessage
 from app.regions import load_region_packs
@@ -176,7 +176,7 @@ def test_auth_check_crash_is_recorded_as_failed(
     def broken_check(message: MailMessage) -> object:
         raise KeyError("unexpected header shape")
 
-    monkeypatch.setattr(poller, "check_dmarc", broken_check)
+    monkeypatch.setattr(ingest, "check_dmarc", broken_check)
     _set_watermark(session, NOW - timedelta(minutes=2))
     source = FakeMailSource()
     source.add(_mail("poll-auth-bug", NOW - timedelta(minutes=1)))

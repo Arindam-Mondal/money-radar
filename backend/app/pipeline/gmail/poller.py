@@ -6,7 +6,6 @@ The overlap re-reads the last few minutes on purpose (search index lag, clock sk
 mail already recorded is skipped, so the overlap costs one list call, not extra fetches.
 """
 
-import logging
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -16,17 +15,13 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
 from app.db.models import SyncState
-from app.pipeline.auth.dmarc import check_dmarc
-from app.pipeline.auth.store import apply_auth_verdict
+from app.pipeline.gmail.ingest import ingest_messages
 from app.pipeline.gmail.query import build_query
-from app.pipeline.gmail.record import record_failed, record_message, unseen_gmail_ids
-from app.pipeline.gmail.source import MailSource, MessageParseError
+from app.pipeline.gmail.source import MailSource
 from app.regions.base import RegionPack
 
 # First poll ever: look back this far. Anything older is the backfill's job (ING-2).
 FIRST_POLL_LOOKBACK: Final = timedelta(days=1)
-
-logger = logging.getLogger("money_radar.pipeline")
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,47 +53,17 @@ def poll_once(
     searched_after = since - overlap
 
     listed = list(source.iter_message_ids(build_query(packs, after=searched_after)))
-    recorded = unverified = failed = 0
-    for gmail_id in unseen_gmail_ids(session, listed):
-        # Gmail/network errors are NOT caught: they abort the poll and the next tick retries.
-        # Only errors about this one message's data are, so it can't block every later poll.
-        try:
-            message = source.get_message(gmail_id)
-        except MessageParseError as e:
-            # internalDate unreadable too (very rare): file it under the poll time instead.
-            failed += _record_failed(session, gmail_id, e.received_at or now, "parse", e)
-            continue
-        try:
-            verdict = check_dmarc(message)
-        except Exception as e:  # pure function: an error here is about this message's data
-            failed += _record_failed(session, gmail_id, message.received_at, "auth", e)
-            continue
-        if not record_message(session, message):
-            continue  # recorded by someone else between the pre-check and now
-        recorded += 1
-        apply_auth_verdict(session, message.id, verdict)
-        if not verdict.passed:
-            unverified += 1
+    counts = ingest_messages(session, source, listed, now=now)
 
     state.polled_until = now
     session.flush()
     return PollResult(
         searched_after=searched_after,
         listed=len(listed),
-        recorded=recorded,
-        unverified=unverified,
-        failed=failed,
+        recorded=counts.recorded,
+        unverified=counts.unverified,
+        failed=counts.failed,
     )
-
-
-def _record_failed(
-    session: Session, gmail_id: str, received_at: datetime, stage: str, error: Exception
-) -> int:
-    """Record a poison message as `failed`; 1 if a row was added, else 0 (for counting)."""
-    cause = error.__cause__ or error  # MessageParseError wraps the parser's real error
-    reason = f"{stage}: {type(cause).__name__}"  # class name only: exception text can quote mail
-    logger.warning("message %s recorded as failed (%s)", gmail_id, reason)
-    return int(record_failed(session, gmail_id, received_at=received_at, error=reason))
 
 
 def _lock_state(session: Session) -> SyncState:

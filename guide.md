@@ -15,8 +15,9 @@ Commands to run, test and poke at every part of Money Radar, grouped by task. Ea
 7. [Gmail: OAuth and token](#7-gmail-oauth-and-token)
 8. [Gmail: preview the search filter](#8-gmail-preview-the-search-filter)
 9. [Worker (scheduler)](#9-worker-scheduler)
-10. [Failure scenarios worth trying](#10-failure-scenarios-worth-trying)
-11. [Troubleshooting](#11-troubleshooting)
+10. [Backfill](#10-backfill)
+11. [Failure scenarios worth trying](#11-failure-scenarios-worth-trying)
+12. [Troubleshooting](#12-troubleshooting)
 
 ---
 
@@ -203,7 +204,22 @@ The `worker` service (`python -m app.worker`) runs APScheduler jobs. It's the on
 | Restart after code changes | `docker compose up -d --build --wait worker` | new container, immediate first tick |
 | Run on the host (no Docker) | `GMAIL_TOKEN_FILE=../secrets/gmail/gmail_token.json uv run --env-file ../.env python -m app.worker` (from `backend/`) | same log lines; Ctrl+C stops it cleanly |
 
-## 10. Failure scenarios worth trying
+## 10. Backfill
+
+Ingests past mail for a range of calendar days (ING-2). `--from` and `--to` are inclusive days in your `TZ` (default `Asia/Kolkata`, so a 00:30 IST alert counts for that IST day). Days already backfilled are recorded in `sync_ranges` and skipped, so re-running a backfill is free. Only complete days are backfilled: a range reaching today stops at yesterday (today is the poller's job). From `repo/`, stack up:
+
+| Task | Command | Expect |
+|---|---|---|
+| Backfill a month | `docker compose exec worker python -m app.pipeline.gmail.backfill --from 2026-09-01 --to 2026-09-30` | `backfill: 2026-09-01 .. 2026-09-30 covered`, then `backfill done: days=30 gaps=1 listed=N recorded=N …` (a few minutes for a few hundred messages) |
+| Run it again | same command | `gaps=0 listed=0 recorded=0`: answered from `sync_ranges`, no Gmail calls |
+| Extend the range | `… --from 2026-08-15 --to 2026-09-30` | `gaps=1`: only Aug 15–31 is searched |
+| What's covered | `docker compose exec db psql -U money_radar -d money_radar -c "select start_date, end_date, completed_at from sync_ranges order by start_date"` | half-open rows: `end_date` is the first day **not** covered (September is `2026-09-01 \| 2026-10-01`) |
+| Forget coverage (re-run a range) | `docker compose exec db psql -U money_radar -d money_radar -c "delete from sync_ranges"` | next backfill searches again; already-recorded mail is skipped, so `recorded=0` |
+| Help | `docker compose exec worker python -m app.pipeline.gmail.backfill --help` | usage |
+
+Messages are committed every 100, and a range is marked covered only after its last page. Stopping a backfill (Ctrl+C, crash, network) keeps the finished batches and leaves the range uncovered; the same command resumes it.
+
+## 11. Failure scenarios worth trying
 
 Each one shows a design decision working. From `repo/`, stack up.
 
@@ -223,10 +239,12 @@ Each one shows a design decision working. From `repo/`, stack up.
 | Worker stopped mid-poll | `docker compose kill -s SIGKILL worker`, then `docker compose up -d worker` | the killed poll's transaction rolls back, so the watermark didn't move; the next tick redoes the same window, and recording is idempotent (unique `gmail_id`) |
 | Overlap re-reads, never duplicates | set `POLL_OVERLAP_MINUTES=1440`, `docker compose up -d --wait worker` | `listed=<all mail of the last day> recorded=0`: everything re-listed, nothing re-downloaded or re-inserted. Set it back afterwards |
 | Poison message | `DB_HOST=127.0.0.1 DB_PORT=5433 uv run --env-file ../.env pytest -m integration tests/integration/test_poller.py -v -k "poison or auth_check"` (from `backend/`) | the bad message gets a `failed` row (`error = parse: ValueError`), the others are recorded, the watermark moves; live you'd see `WARNING … message <id> recorded as failed` and `failed=1`. Find them with `select gmail_id, error from messages where status = 'failed'` |
+| Backfill interrupted | start a month's backfill, press Ctrl+C after a few seconds, run the same command again | first run: no new `sync_ranges` row; second run: `recorded=` only the rest, then the range is covered |
+| Backfill reaching into today | `docker compose exec worker python -m app.pipeline.gmail.backfill --from <yesterday> --to <tomorrow>` | covers yesterday only; `sync_ranges` ends at today |
 | Late-indexed mail, crash mid-poll, two pollers at once | `DB_HOST=127.0.0.1 DB_PORT=5433 uv run --env-file ../.env pytest -m integration tests/integration/test_poller.py -v` (from `backend/`) | overlap picks up late mail; a crash leaves the watermark unmoved; a second poller blocks on the `sync_state` row lock |
 | Invalid status rejected by the DB | `docker compose exec db psql -U money_radar -d money_radar -c "insert into messages (gmail_id, received_at, status, pipeline_version) values ('x', now(), 'banana', 1)"` | `invalid input value for enum message_status: "banana"`; nothing inserted |
 
-## 11. Troubleshooting
+## 12. Troubleshooting
 
 | Symptom | Cause / fix |
 |---|---|
@@ -244,5 +262,7 @@ Each one shows a design decision working. From `repo/`, stack up.
 | `time : The term 'time' is not recognized` | You're in PowerShell, not Git Bash; use `Measure-Command { … }` (see section 1) or open a Git Bash terminal |
 | Gmail: browser opens on every run | Token can't be used; read the message printed before `-> starting consent` |
 | Worker: `Permission denied` saving the token (Linux host) | `secrets/gmail/` must be writable by the container user (UID 10001): `sudo chown 10001 secrets/gmail`. Docker Desktop on Windows/macOS doesn't need this |
+| Backfill logs `Encountered 403 Forbidden with reason "rateLimitExceeded"` or `Gmail rate limit reached; waiting 15 s` | Gmail's per-user, per-minute quota (Cloud Console → Gmail API → Quotas: "Units per minute per user"). Normal: the client retries briefly, then waits 15/30/60/60 s for the quota window to reset. Only if it is still limited after ~3 minutes does the backfill stop with the 403; run the same command again and it resumes (finished batches are kept) |
+| `TZ must be an IANA zone` at startup | `TZ` in `.env` must be a zone name like `Asia/Kolkata` (not `IST`, not `Asia/Bengaluru`) |
 | Worker: `No Gmail token at /app/state/gmail/gmail_token.json` | Token is still at the old path `secrets/gmail_token.json`: move it into `secrets/gmail/`, and set `GMAIL_TOKEN_FILE=/app/state/gmail/gmail_token.json` in `.env` |
 | Gmail: `access_denied` / app not available | Your Google account isn't a test user on the OAuth consent screen |

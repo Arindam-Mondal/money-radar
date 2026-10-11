@@ -2,6 +2,7 @@ from enum import StrEnum
 from functools import lru_cache
 from pathlib import Path
 from typing import Annotated
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
@@ -33,6 +34,8 @@ class Settings(BaseSettings):
     poll_overlap_minutes: int = Field(default=10, ge=1, le=1440)
     # REGION_PACKS=india,us  (NoDecode: a plain comma list, not the JSON pydantic expects)
     region_packs: Annotated[tuple[str, ...], NoDecode] = ("india",)
+    # IANA zone for calendar days: a 00:30 IST alert belongs to that IST day, not the UTC one.
+    tz: str = "Asia/Kolkata"
 
     # A writable DIRECTORY is mounted at /app/state/gmail: the token is rewritten on refresh.
     gmail_token_file: Path = Path("/app/state/gmail/gmail_token.json")
@@ -51,6 +54,19 @@ class Settings(BaseSettings):
         if not value:
             raise ValueError("REGION_PACKS must name at least one pack, e.g. 'india'")
         return value
+
+    @field_validator("tz")
+    @classmethod
+    def _known_zone(cls, value: str) -> str:
+        try:
+            ZoneInfo(value)
+        except (ZoneInfoNotFoundError, ValueError) as e:
+            raise ValueError(f"TZ must be an IANA zone like 'Asia/Kolkata' (got {value!r})") from e
+        return value
+
+    @property
+    def zone(self) -> ZoneInfo:
+        return ZoneInfo(self.tz)
 
     @property
     def database_url(self) -> URL:

@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime
 from enum import StrEnum
 from typing import Any, ClassVar
 
@@ -94,3 +94,19 @@ class SenderRegistry(Base):
     status: Mapped[SenderStatus] = mapped_column(pg_enum(SenderStatus, "sender_status"))
     first_seen: Mapped[datetime] = mapped_column(server_default=func.now())
     txn_count: Mapped[int] = mapped_column(default=0, server_default="0")
+
+
+class SyncRange(Base):
+    """Calendar days the backfill has fully ingested (ING-2). Half-open: end_date is excluded.
+
+    A row is written only after every message in the range was processed, so an
+    interrupted backfill leaves no row and the next run redoes that range.
+    """
+
+    __tablename__ = "sync_ranges"
+    __table_args__ = (CheckConstraint("start_date < end_date", name="nonempty"),)
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(always=True), primary_key=True)
+    start_date: Mapped[date]
+    end_date: Mapped[date]  # first day NOT covered
+    completed_at: Mapped[datetime] = mapped_column(server_default=func.now())

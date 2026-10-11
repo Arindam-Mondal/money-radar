@@ -46,6 +46,18 @@ def test_poll_overlap_reads_environment(monkeypatch: pytest.MonkeyPatch) -> None
     assert Settings().poll_overlap_minutes == 30
 
 
+def test_tz_defaults_to_india_and_is_a_zone() -> None:
+    settings = Settings()
+    assert settings.tz == "Asia/Kolkata"
+    assert str(settings.zone) == "Asia/Kolkata"
+
+
+def test_unknown_tz_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TZ", "Asia/Bengaluru")  # plausible, but not an IANA zone
+    with pytest.raises(ValidationError, match="IANA zone"):
+        Settings()
+
+
 def test_missing_db_password_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("DB_PASSWORD")
     with pytest.raises(ValidationError):

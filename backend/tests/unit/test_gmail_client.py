@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -9,12 +10,13 @@ import httplib2
 import pytest
 from googleapiclient.errors import HttpError
 
-from app.pipeline.gmail.client import GmailMailSource
+from app.pipeline.gmail.client import RATE_LIMIT_WAITS, GmailMailSource
 from app.pipeline.gmail.source import HistoryExpiredError, MessageParseError
 
 
-def _http_error(status: int) -> HttpError:
-    return HttpError(httplib2.Response({"status": str(status)}), b"{}")
+def _http_error(status: int, reason: str | None = None) -> HttpError:
+    body = {"error": {"message": "x", "errors": [{"reason": reason}]}} if reason else {}
+    return HttpError(httplib2.Response({"status": str(status)}), json.dumps(body).encode())
 
 
 def _paged(resource: MagicMock, pages: list[dict[str, Any]]) -> None:
@@ -164,3 +166,54 @@ def test_get_message_http_errors_are_not_parse_errors() -> None:
 
     with pytest.raises(HttpError):
         GmailMailSource(service).get_message("m1")
+
+
+def _get(service: MagicMock) -> MagicMock:
+    get: MagicMock = service.users().messages().get()
+    return get
+
+
+_RAW = {"id": "m1", "threadId": "t1", "internalDate": "0", "payload": {}}
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        _http_error(403, "rateLimitExceeded"),  # Gmail's "errors" format
+        _http_error(403, "RATE_LIMIT_EXCEEDED"),  # google.rpc ErrorInfo format
+        _http_error(429),
+    ],
+)
+def test_rate_limit_waits_then_succeeds(error: HttpError) -> None:
+    service = MagicMock()
+    _get(service).execute.side_effect = [error, error, _RAW]
+    waits: list[float] = []
+
+    message = GmailMailSource(service, sleep=waits.append).get_message("m1")
+
+    assert message.id == "m1"
+    assert waits == list(RATE_LIMIT_WAITS[:2])  # waited twice, at growing intervals
+
+
+def test_rate_limit_gives_up_after_the_last_wait() -> None:
+    service = MagicMock()
+    _get(service).execute.side_effect = _http_error(403, "rateLimitExceeded")
+    waits: list[float] = []
+
+    with pytest.raises(HttpError):
+        GmailMailSource(service, sleep=waits.append).get_message("m1")
+
+    assert waits == list(RATE_LIMIT_WAITS)
+    assert _get(service).execute.call_count == len(RATE_LIMIT_WAITS) + 1
+
+
+def test_permission_403_is_not_retried() -> None:
+    # A 403 without a rate-limit reason (e.g. scope missing) won't fix itself by waiting.
+    service = MagicMock()
+    _get(service).execute.side_effect = _http_error(403, "insufficientPermissions")
+    waits: list[float] = []
+
+    with pytest.raises(HttpError):
+        GmailMailSource(service, sleep=waits.append).get_message("m1")
+
+    assert waits == []
