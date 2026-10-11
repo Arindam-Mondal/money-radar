@@ -88,6 +88,15 @@ select sender_domain, count(*) from messages where status = 'unverified' group b
 select * from sender_registry order by first_seen desc;                  -- known sender domains
 ```
 
+The job queue (`jobs`, API → worker; claimed with `FOR UPDATE SKIP LOCKED`, see design §4.6):
+
+```sql
+select id, kind, status, attempts, params, progress, error, run_after, heartbeat_at from jobs order by id desc limit 10;
+select status, count(*) from jobs group by status;                       -- queued / running / done / failed
+```
+
+A `queued` job runs once `run_after` has passed: after a temporary error (Gmail rate limit or 5xx, a DB blip) it goes back to `queued` with `run_after` 1, 5, then 15 minutes later, and `error` shows why. A permanent error (e.g. `GmailAuthError`) marks it `failed` at once. A `running` job whose `heartbeat_at` is more than 10 minutes old is orphaned (its worker died) and is picked up again. A job is tried at most 3 times.
+
 `auth_result` codes: `dmarc=pass` (continues), and for quarantined (`unverified`) mail: `dmarc=fail` / `dmarc=none` / `dmarc=temperror` / … (Gmail's verdict), `dmarc=absent` (no DMARC result), `dmarc=misaligned` (pass was for another domain), `untrusted-authserv` (first header not written by Gmail), `no-auth-results`, `bad-from` (missing, multiple or malformed From).
 
 ## 5. Migrations (Alembic)
@@ -241,6 +250,7 @@ Each one shows a design decision working. From `repo/`, stack up.
 | Poison message | `DB_HOST=127.0.0.1 DB_PORT=5433 uv run --env-file ../.env pytest -m integration tests/integration/test_poller.py -v -k "poison or auth_check"` (from `backend/`) | the bad message gets a `failed` row (`error = parse: ValueError`), the others are recorded, the watermark moves; live you'd see `WARNING … message <id> recorded as failed` and `failed=1`. Find them with `select gmail_id, error from messages where status = 'failed'` |
 | Backfill interrupted | start a month's backfill, press Ctrl+C after a few seconds, run the same command again | first run: no new `sync_ranges` row; second run: `recorded=` only the rest, then the range is covered |
 | Backfill reaching into today | `docker compose exec worker python -m app.pipeline.gmail.backfill --from <yesterday> --to <tomorrow>` | covers yesterday only; `sync_ranges` ends at today |
+| Job queue: two workers, dead worker, retries, poison job | `DB_HOST=127.0.0.1 DB_PORT=5433 uv run --env-file ../.env pytest -m integration tests/integration/test_jobqueue.py -v` (from `backend/`) | two workers never get the same job (`SKIP LOCKED`); an orphaned job is re-claimed after its lease; the slow old worker's writes are refused; retries wait 1/5/15 min; a job fails after 3 attempts; the claim uses the partial index `ix_jobs_claimable` even with 20k finished jobs |
 | Late-indexed mail, crash mid-poll, two pollers at once | `DB_HOST=127.0.0.1 DB_PORT=5433 uv run --env-file ../.env pytest -m integration tests/integration/test_poller.py -v` (from `backend/`) | overlap picks up late mail; a crash leaves the watermark unmoved; a second poller blocks on the `sync_state` row lock |
 | Invalid status rejected by the DB | `docker compose exec db psql -U money_radar -d money_radar -c "insert into messages (gmail_id, received_at, status, pipeline_version) values ('x', now(), 'banana', 1)"` | `invalid input value for enum message_status: "banana"`; nothing inserted |
 
@@ -263,6 +273,7 @@ Each one shows a design decision working. From `repo/`, stack up.
 | Gmail: browser opens on every run | Token can't be used; read the message printed before `-> starting consent` |
 | Worker: `Permission denied` saving the token (Linux host) | `secrets/gmail/` must be writable by the container user (UID 10001): `sudo chown 10001 secrets/gmail`. Docker Desktop on Windows/macOS doesn't need this |
 | Backfill logs `Encountered 403 Forbidden with reason "rateLimitExceeded"` or `Gmail rate limit reached; waiting 15 s` | Gmail's per-user, per-minute quota (Cloud Console → Gmail API → Quotas: "Units per minute per user"). Normal: the client retries briefly, then waits 15/30/60/60 s for the quota window to reset. Only if it is still limited after ~3 minutes does the backfill stop with the 403; run the same command again and it resumes (finished batches are kept) |
+| Integration tests hang, or `jobs` has rows with params like `{"n": 1}` | A test run was killed before its cleanup: the two-worker test commits real rows and deletes them afterwards. Remove them with `docker compose exec db psql -U money_radar -d money_radar -c "delete from jobs where params ? 'n'"` |
 | `TZ must be an IANA zone` at startup | `TZ` in `.env` must be a zone name like `Asia/Kolkata` (not `IST`, not `Asia/Bengaluru`) |
 | Worker: `No Gmail token at /app/state/gmail/gmail_token.json` | Token is still at the old path `secrets/gmail_token.json`: move it into `secrets/gmail/`, and set `GMAIL_TOKEN_FILE=/app/state/gmail/gmail_token.json` in `.env` |
 | Gmail: `access_denied` / app not available | Your Google account isn't a test user on the OAuth consent screen |
